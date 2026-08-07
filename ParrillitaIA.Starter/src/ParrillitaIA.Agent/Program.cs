@@ -42,7 +42,7 @@ builder.Services.AddSingleton<IExecutionHistory, JsonExecutionHistory>();
 
 // Sustituir SimulatedSoftRestaurantBot por FlaUiSoftRestaurantBot
 // cuando se hayan identificado los controles reales con FlaUInspect.
-builder.Services.AddSingleton<ISoftRestaurantBot, FlaUiSoftRestaurantBot>();
+builder.Services.AddSingleton<ISoftRestaurantBot, SimulatedSoftRestaurantBot>();
 
 builder.Services.AddHostedService<AgentWorker>();
 
