@@ -20,10 +20,16 @@ public sealed class ReportFileNameService : IReportFileNameService
 
         return job.Kind switch
         {
+            // Formato de cierres solicitado:
+            // 1-2 SAMBRANO.xlsx
+            // 2-2 SANCHEZ.xlsx
+            //
+            // Día-Mes + nombre real del usuario de SoftRestaurant.
             ReportKind.CashClosure =>
-                $"{job.StartDate:yyyy-MM-dd}_{local}_{Normalize(job.Cashier ?? "SIN_USUARIO")}_CIERRE_CAJA{extension}",
+                $"{job.StartDate.Day}-{job.StartDate.Month} " +
+                $"{NormalizeDisplay(job.Cashier ?? "SIN USUARIO")}{extension}",
 
-            // Formato alineado con el esquema actual:
+            // Formato actual de delivery:
             // ALAJUELA DIDI 3-8 AL 9-8.xlsx
             ReportKind.DeliverySales =>
                 $"{local} {GetPlatformFileLabel(job.Platform)} " +
@@ -65,14 +71,13 @@ public sealed class ReportFileNameService : IReportFileNameService
 
         return job.Kind switch
         {
-            // Si la raíz ya es "Cierres - Sabana":
-            // 2026\8.Agosto
+            // La raíz de OneDrive ya identifica el local:
+            // Cierres - Sabana\2026\8.Agosto
             ReportKind.CashClosure => Path.Combine(
                 date.Year.ToString(),
                 month),
 
-            // Si la raíz ya es "Reportes Delivery Sabana":
-            // 2026\8.Agosto\Didi
+            // Reportes Delivery Sabana\2026\8.Agosto\Didi
             ReportKind.DeliverySales => Path.Combine(
                 date.Year.ToString(),
                 month,
@@ -109,10 +114,26 @@ public sealed class ReportFileNameService : IReportFileNameService
         };
     }
 
-    private static string ToDisplayName(string value)
+    // Para archivos de cierre conservamos espacios y hacemos el nombre legible.
+    // También elimina caracteres que Windows no permite en nombres de archivo.
+    private static string NormalizeDisplay(string value)
     {
-        var lower = value.Replace('_', ' ').ToLowerInvariant();
-        return CultureInfo.CurrentCulture.TextInfo.ToTitleCase(lower);
+        var invalidChars = Path.GetInvalidFileNameChars();
+
+        var normalized = value
+            .Trim()
+            .ToUpperInvariant()
+            .Normalize(NormalizationForm.FormD);
+
+        var chars = normalized
+            .Where(c => CharUnicodeInfo.GetUnicodeCategory(c) != UnicodeCategory.NonSpacingMark)
+            .Where(c => !invalidChars.Contains(c))
+            .ToArray();
+
+        return string.Join(
+            ' ',
+            new string(chars)
+                .Split(' ', StringSplitOptions.RemoveEmptyEntries));
     }
 
     private static string Normalize(string value)
@@ -138,6 +159,12 @@ public sealed class ReportFileNameService : IReportFileNameService
         extension.StartsWith('.')
             ? extension.ToLowerInvariant()
             : $".{extension.ToLowerInvariant()}";
+
+    private static string ToDisplayName(string value)
+    {
+        var lower = value.Replace('_', ' ').ToLowerInvariant();
+        return CultureInfo.CurrentCulture.TextInfo.ToTitleCase(lower);
+    }
 
     private static string GetMonthName(int month) => month switch
     {
