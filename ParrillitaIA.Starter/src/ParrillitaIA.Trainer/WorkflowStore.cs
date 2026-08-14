@@ -13,20 +13,16 @@ public static class WorkflowStore
     public static void Save(string path, WorkflowModel model)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-
-        var temp = path + ".tmp";
-        File.WriteAllText(temp, JsonSerializer.Serialize(model, Options));
-        File.Move(temp, path, overwrite: true);
+        File.WriteAllText(path, JsonSerializer.Serialize(model, Options));
     }
 
     public static WorkflowModel Load(string path)
     {
-        var json = File.ReadAllText(path);
-
-        return JsonSerializer.Deserialize<WorkflowModel>(json, Options)
-               ?? throw new InvalidOperationException("El flujo JSON no es válido.");
+        return JsonSerializer.Deserialize<WorkflowModel>(
+            File.ReadAllText(path), Options)
+            ?? throw new InvalidOperationException("El flujo JSON no es válido.");
     }
 
-    public static string ToPrettyJson(WorkflowModel model) =>
+    public static string Pretty(WorkflowModel model) =>
         JsonSerializer.Serialize(model, Options);
 }
