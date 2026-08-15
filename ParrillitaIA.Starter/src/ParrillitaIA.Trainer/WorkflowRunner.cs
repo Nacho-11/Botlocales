@@ -4,195 +4,575 @@ namespace ParrillitaIA.Trainer;
 
 public sealed class WorkflowRunner
 {
+    private const int MaxVisualUsers = 40;
+    private const int VisibleRows = 10;
+
+    // Geometría inicial observada en SAN_PEDRO.
+    private const int FirstRowOffsetY = 20;
+    private const int RowHeight = 15;
+    private const int InsideListOffsetX = -40;
+
     public async Task RunAsync(
         WorkflowModel workflow,
         CancellationToken cancellationToken)
     {
         if (workflow.Steps.Count == 0)
-        {
             throw new InvalidOperationException(
                 "El flujo no contiene pasos.");
-        }
 
-        foreach (var step in workflow.Steps
-                     .OrderBy(x => x.Order))
+        if (string.Equals(
+                workflow.Name,
+                "CIERRES",
+                StringComparison.OrdinalIgnoreCase))
         {
-            cancellationToken
-                .ThrowIfCancellationRequested();
-
-            await Task.Delay(
-                Math.Clamp(
-                    step.DelayBeforeMs,
-                    100,
-                    30000),
+            await RunVisualClosuresAsync(
+                workflow,
                 cancellationToken);
 
+            return;
+        }
+
+        foreach (var step in workflow.Steps.OrderBy(x => x.Order))
+            await ExecuteGenericStepAsync(step, cancellationToken);
+    }
+
+    private async Task RunVisualClosuresAsync(
+        WorkflowModel workflow,
+        CancellationToken cancellationToken)
+    {
+        Console.WriteLine();
+        Console.WriteLine(
+            "=== CIERRES VISUALES V3.7.4 ===");
+
+        var steps =
+            workflow.Steps
+                .OrderBy(x => x.Order)
+                .ToList();
+
+        var dateStep =
+            steps.FirstOrDefault(
+                x => x.Action.Equals(
+                    "SetYesterdayDate",
+                    StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException(
+                "No existe SetYesterdayDate.");
+
+        var userAnchor =
+            steps.FirstOrDefault(x => x.Order == 6)
+            ?? throw new InvalidOperationException(
+                "No existe paso 6 de Usuario.");
+
+        var executeSteps =
+            steps
+                .Where(x => x.Order >= 29 && x.Order <= 34)
+                .ToList();
+
+        foreach (var step in steps.Where(x => x.Order <= 3))
+            await ExecuteGenericStepAsync(step, cancellationToken);
+
+        await RequireMonthViewAsync(
+            dateStep,
+            cancellationToken);
+
+        var yesterday =
+            DateTime.Today.AddDays(-1);
+
+        await SelectYesterdayAsync(
+            dateStep,
+            cancellationToken);
+
+        Console.WriteLine(
+            $"Fecha de prueba: {yesterday:dd/MM/yyyy}");
+
+        ulong? previousHash = null;
+        var sameCount = 0;
+        var tested = 0;
+
+        for (var index = 0;
+             index < MaxVisualUsers;
+             index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            Console.WriteLine();
             Console.WriteLine(
-                $"[{step.Order:000}] {step.Action} " +
-                $"Proceso=\"{step.ProcessName}\" " +
-                $"Estable=\"{Display(step.StableTitle)}\"");
+                $"--- POSICIÓN VISUAL {index} ---");
 
-            // SetYesterdayDate es especial:
-            // el clic anterior ya dejó foco en el campo Fecha.
-            // NO hacemos SetForegroundWindow aquí porque podría robar ese foco.
-            if (step.Action.Equals(
-                    "SetYesterdayDate",
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                await PasteYesterdayAsync(
-                    step.ValueFormat,
+            await RequireMonthViewAsync(
+                dateStep,
+                cancellationToken);
+
+            await SelectYesterdayAsync(
+                dateStep,
+                cancellationToken);
+
+            var selected =
+                await SelectVisualIndexAsync(
+                    userAnchor,
+                    index,
                     cancellationToken);
 
-                continue;
-            }
+            var hash =
+                CaptureFieldFingerprint(
+                    selected.Window,
+                    selected.AnchorX,
+                    selected.AnchorY);
 
-            // Acciones que dependen del foco dejado por el paso anterior.
-            // NO debemos enfocar nuevamente la ventana.
-            if (step.Action.Equals(
-                    "KeyPress",
-                    StringComparison.OrdinalIgnoreCase))
+            var changed =
+                previousHash is null ||
+                previousHash.Value != hash;
+
+            Console.WriteLine(
+                $"Huella usuario=0x{hash:X16} " +
+                $"Cambio={(changed ? "SI" : "NO")}");
+
+            if (!changed)
             {
-                await SendKeyToLastControlAsync(
-                    step.VirtualKey,
-                    step.Ctrl,
-                    step.Shift,
-                    step.Alt,
-                    cancellationToken);
+                sameCount++;
 
-                continue;
+                Console.WriteLine(
+                    $"Selector sin cambio consecutivo: {sameCount}/2");
             }
-
-            if (step.Action.Equals(
-                    "SetYesterdayDate",
-                    StringComparison.OrdinalIgnoreCase))
+            else
             {
-                await PasteYesterdayAsync(
-                    step.ValueFormat,
-                    cancellationToken);
-
-                continue;
+                sameCount = 0;
             }
 
-            var handle =
-                await WaitForWindowAsync(
+            // Dos selecciones consecutivas sin cambio = llegamos al final.
+            if (sameCount >= 2)
+            {
+                Console.WriteLine();
+                Console.WriteLine(
+                    $"FIN VISUAL detectado en índice {index}.");
+
+                break;
+            }
+
+            previousHash = hash;
+            tested++;
+
+            Console.WriteLine(
+                $"Ejecutando reporte para posición {index}...");
+
+            foreach (var step in executeSteps)
+                await ExecuteGenericStepAsync(
                     step,
                     cancellationToken);
 
-            if (handle == IntPtr.Zero)
+            var saveDialog =
+                await WaitForWindowByTitleAsync(
+                    workflow.TargetProcessName,
+                    "Guardar como",
+                    8000,
+                    cancellationToken);
+
+            if (saveDialog != IntPtr.Zero)
             {
-                throw new InvalidOperationException(
-                    $"No apareció la ventana esperada en paso {step.Order}.");
+                Console.WriteLine(
+                    $"RESULTADO índice {index}: HAY CIERRE / apareció Guardar como.");
+
+                // En V374 de prueba NO guardamos.
+                // Cerramos el diálogo para poder seguir recorriendo usuarios.
+                NativeMethods.SendMessage(
+                    saveDialog,
+                    NativeMethods.WM_CLOSE,
+                    IntPtr.Zero,
+                    IntPtr.Zero);
+
+                await Task.Delay(
+                    700,
+                    cancellationToken);
             }
-
-            NativeMethods.SetForegroundWindow(
-                handle);
-
-            await Task.Delay(
-                200,
-                cancellationToken);
-
-            switch (step.Action)
+            else
             {
-                case "WaitForWindow":
-                    Console.WriteLine(
-                        "      ✓ Checkpoint encontrado.");
-                    break;
+                Console.WriteLine(
+                    $"RESULTADO índice {index}: SIN Guardar como.");
 
-                case "LeftClick":
-                    await ExecuteClickAsync(
-                        step,
-                        handle,
-                        cancellationToken);
-                    break;
-
-                default:
-                    throw new InvalidOperationException(
-                        $"Acción desconocida: {step.Action}");
+                await CloseAnyDialogAsync(
+                    workflow.TargetProcessName,
+                    cancellationToken);
             }
         }
+
+        Console.WriteLine();
+        Console.WriteLine(
+            $"=== FIN PRUEBA VISUAL: posiciones probadas={tested} ===");
     }
 
-    private static IntPtr _lastInputTarget = IntPtr.Zero;
+    private sealed record SelectionResult(
+        IntPtr Window,
+        int AnchorX,
+        int AnchorY);
 
-    private static async Task ExecuteClickAsync(
-        WorkflowStep step,
-        IntPtr handle,
+    private static async Task<SelectionResult> SelectVisualIndexAsync(
+        WorkflowStep anchor,
+        int index,
         CancellationToken cancellationToken)
     {
+        var window =
+            await WaitForWindowAsync(
+                anchor,
+                cancellationToken);
+
+        if (window == IntPtr.Zero)
+            throw new InvalidOperationException(
+                "No apareció la ventana del selector Usuario.");
+
         if (!NativeMethods.GetWindowRect(
-                handle,
+                window,
                 out var rect))
-        {
             throw new InvalidOperationException(
-                $"No se pudo leer la ventana en paso {step.Order}.");
-        }
+                "No se pudo leer la ventana Usuario.");
 
-        // Protección extra para flujos viejos o corruptos.
-        if (step.RelativeX < 0.0 ||
-            step.RelativeX >= 1.0 ||
-            step.RelativeY < 0.0 ||
-            step.RelativeY >= 1.0)
-        {
-            throw new InvalidOperationException(
-                $"Paso {step.Order}: coordenada relativa inválida " +
-                $"X={step.RelativeX:0.0000}; Y={step.RelativeY:0.0000}. " +
-                "Reentrena este flujo.");
-        }
-
-        var x =
+        var anchorX =
             rect.Left +
             (int)Math.Round(
-                rect.Width *
-                step.RelativeX);
+                rect.Width * anchor.RelativeX);
 
-        var y =
+        var anchorY =
             rect.Top +
             (int)Math.Round(
-                rect.Height *
-                step.RelativeY);
+                rect.Height * anchor.RelativeY);
 
-        // Asegurar que el punto calculado esté realmente dentro de la ventana.
-        if (x < rect.Left ||
-            x >= rect.Right ||
-            y < rect.Top ||
-            y >= rect.Bottom)
-        {
-            throw new InvalidOperationException(
-                $"Paso {step.Order}: clic calculado fuera de ventana en ({x},{y}).");
-        }
+        NativeMethods.SetForegroundWindow(
+            window);
 
-        if (!await TryMoveCursorAsync(
-                x,
-                y,
-                cancellationToken))
+        NativeMethods.SetCursorPos(
+            anchorX,
+            anchorY);
+
+        Click();
+
+        await Task.Delay(
+            450,
+            cancellationToken);
+
+        var listX =
+            anchorX +
+            InsideListOffsetX;
+
+        var listY =
+            anchorY +
+            FirstRowOffsetY;
+
+        NativeMethods.SetCursorPos(
+            listX,
+            listY);
+
+        // Intentar llevar siempre el desplegable al inicio.
+        // Una cantidad grande de scroll hacia arriba es segura: al llegar al principio
+        // los eventos restantes ya no deberían cambiar la posición.
+        for (var i = 0; i < 25; i++)
         {
-            throw new InvalidOperationException(
-                $"No se pudo mover el cursor a ({x},{y}) en paso {step.Order}.");
+            MouseWheel(+120);
+            await Task.Delay(20, cancellationToken);
         }
 
         await Task.Delay(
-            100,
+            250,
             cancellationToken);
 
-        Click();
+        int visibleIndex;
+
+        if (index < VisibleRows)
+        {
+            visibleIndex = index;
+        }
+        else
+        {
+            // Mantener la fila inferior visible y desplazar la lista hacia abajo.
+            visibleIndex = VisibleRows - 1;
+
+            var requiredScroll =
+                index -
+                (VisibleRows - 1);
+
+            Console.WriteLine(
+                $"Scroll visual requerido={requiredScroll}");
+
+            for (var i = 0;
+                 i < requiredScroll;
+                 i++)
+            {
+                // Usamos una rueda por iteración.
+                MouseWheel(-120);
+
+                await Task.Delay(
+                    120,
+                    cancellationToken);
+            }
+        }
+
+        var rowX =
+            listX;
+
+        var rowY =
+            anchorY +
+            FirstRowOffsetY +
+            visibleIndex *
+            RowHeight;
+
+        Console.WriteLine(
+            $"Click posición: index={index}, " +
+            $"visible={visibleIndex}, ({rowX},{rowY})");
+
+        NativeMethods.SetCursorPos(
+            rowX,
+            rowY);
 
         await Task.Delay(
             150,
             cancellationToken);
 
-        var point =
-            new NativeMethods.POINT
-            {
-                X = x,
-                Y = y
-            };
+        Click();
 
-        _lastInputTarget =
-            NativeMethods.WindowFromPoint(
-                point);
+        await Task.Delay(
+            550,
+            cancellationToken);
+
+        return new SelectionResult(
+            window,
+            anchorX,
+            anchorY);
+    }
+
+    private static ulong CaptureFieldFingerprint(
+        IntPtr window,
+        int anchorX,
+        int anchorY)
+    {
+        // Muestreamos una caja alrededor del valor visible de Usuario.
+        // FNV-1a 64-bit sobre 18 x 5 píxeles distribuidos.
+        const int leftOffset = -130;
+        const int topOffset = -10;
+        const int width = 120;
+        const int height = 20;
+
+        var hdc =
+            NativeMethods.GetDC(
+                IntPtr.Zero);
+
+        if (hdc == IntPtr.Zero)
+            return 0;
+
+        try
+        {
+            ulong hash =
+                1469598103934665603UL;
+
+            for (var gy = 0; gy < 5; gy++)
+            {
+                for (var gx = 0; gx < 18; gx++)
+                {
+                    var x =
+                        anchorX +
+                        leftOffset +
+                        gx *
+                        width /
+                        17;
+
+                    var y =
+                        anchorY +
+                        topOffset +
+                        gy *
+                        height /
+                        4;
+
+                    var pixel =
+                        NativeMethods.GetPixel(
+                            hdc,
+                            x,
+                            y);
+
+                    hash ^=
+                        pixel;
+
+                    hash *=
+                        1099511628211UL;
+                }
+            }
+
+            return hash;
+        }
+        finally
+        {
+            NativeMethods.ReleaseDC(
+                IntPtr.Zero,
+                hdc);
+        }
+    }
+
+    private static async Task RequireMonthViewAsync(
+        WorkflowStep dateStep,
+        CancellationToken cancellationToken)
+    {
+        var h =
+            await WaitForWindowAsync(
+                dateStep,
+                cancellationToken);
+
+        if (h == IntPtr.Zero)
+            throw new InvalidOperationException(
+                "No se detectó MonthView; se detiene para evitar clics incorrectos.");
+    }
+
+    private static async Task SelectYesterdayAsync(
+        WorkflowStep dateStep,
+        CancellationToken cancellationToken)
+    {
+        var month =
+            await WaitForWindowAsync(
+                dateStep,
+                cancellationToken);
+
+        if (month == IntPtr.Zero)
+            throw new InvalidOperationException(
+                "No apareció MonthView.");
+
+        if (!NativeMethods.GetWindowRect(
+                month,
+                out var rect))
+            throw new InvalidOperationException(
+                "No se pudo leer MonthView.");
+
+        var date =
+            DateTime.Today.AddDays(-1);
+
+        var first =
+            new DateTime(
+                date.Year,
+                date.Month,
+                1);
+
+        var firstColumn =
+            ((int)first.DayOfWeek + 6) % 7;
+
+        var dayIndex =
+            firstColumn +
+            date.Day -
+            1;
+
+        var row =
+            dayIndex / 7;
+
+        var col =
+            dayIndex % 7;
+
+        const double left = 0.025;
+        const double right = 0.025;
+        const double top = 0.30;
+        const double bottom = 0.97;
+
+        var cellWidth =
+            rect.Width *
+            (1 - left - right) /
+            7.0;
+
+        var cellHeight =
+            rect.Height *
+            (bottom - top) /
+            6.0;
+
+        var x =
+            rect.Left +
+            (int)Math.Round(
+                rect.Width * left +
+                cellWidth * (col + 0.5));
+
+        var y =
+            rect.Top +
+            (int)Math.Round(
+                rect.Height * top +
+                cellHeight * (row + 0.5));
 
         Console.WriteLine(
-            $"      Control destino HWND=0x{_lastInputTarget.ToInt64():X}");
+            $"AYER {date:dd/MM/yyyy} click=({x},{y})");
+
+        NativeMethods.SetForegroundWindow(
+            month);
+
+        NativeMethods.SetCursorPos(
+            x,
+            y);
+
+        Click();
+
+        await Task.Delay(
+            450,
+            cancellationToken);
+    }
+
+    private static async Task ExecuteGenericStepAsync(
+        WorkflowStep step,
+        CancellationToken cancellationToken)
+    {
+        await Task.Delay(
+            Math.Clamp(
+                step.DelayBeforeMs,
+                100,
+                30000),
+            cancellationToken);
+
+        var handle =
+            await WaitForWindowAsync(
+                step,
+                cancellationToken);
+
+        if (handle == IntPtr.Zero)
+            throw new InvalidOperationException(
+                $"No apareció la ventana del paso {step.Order}.");
+
+        if (step.Action == "WaitForWindow")
+            return;
+
+        if (step.Action == "SetYesterdayDate")
+        {
+            await SelectYesterdayAsync(
+                step,
+                cancellationToken);
+
+            return;
+        }
+
+        if (step.Action == "KeyPress")
+        {
+            SendKey(
+                step.VirtualKey,
+                step.Ctrl,
+                step.Shift,
+                step.Alt);
+
+            return;
+        }
+
+        if (step.Action != "LeftClick")
+            throw new InvalidOperationException(
+                $"Acción desconocida {step.Action}");
+
+        if (!NativeMethods.GetWindowRect(
+                handle,
+                out var rect))
+            throw new InvalidOperationException(
+                "No se pudo leer ventana.");
+
+        var x =
+            rect.Left +
+            (int)Math.Round(
+                rect.Width * step.RelativeX);
+
+        var y =
+            rect.Top +
+            (int)Math.Round(
+                rect.Height * step.RelativeY);
+
+        NativeMethods.SetForegroundWindow(
+            handle);
+
+        NativeMethods.SetCursorPos(
+            x,
+            y);
+
+        Click();
     }
 
     private static async Task<IntPtr> WaitForWindowAsync(
@@ -206,21 +586,16 @@ public sealed class WorkflowRunner
                     1000,
                     60000));
 
-        while (DateTimeOffset.UtcNow <
-               deadline)
+        while (DateTimeOffset.UtcNow < deadline)
         {
-            cancellationToken
-                .ThrowIfCancellationRequested();
+            cancellationToken.ThrowIfCancellationRequested();
 
-            var handle =
+            var h =
                 WindowInfo.FindBestWindow(
                     step);
 
-            if (handle !=
-                IntPtr.Zero)
-            {
-                return handle;
-            }
+            if (h != IntPtr.Zero)
+                return h;
 
             await Task.Delay(
                 250,
@@ -230,134 +605,180 @@ public sealed class WorkflowRunner
         return IntPtr.Zero;
     }
 
-    private static async Task<bool> TryMoveCursorAsync(
-        int x,
-        int y,
+    private static async Task<IntPtr> WaitForWindowByTitleAsync(
+        string processName,
+        string title,
+        int timeoutMs,
         CancellationToken cancellationToken)
     {
-        for (var attempt = 1;
-             attempt <= 5;
-             attempt++)
+        var deadline =
+            DateTimeOffset.UtcNow.AddMilliseconds(
+                timeoutMs);
+
+        while (DateTimeOffset.UtcNow < deadline)
         {
-            if (NativeMethods.SetCursorPos(
-                    x,
-                    y))
-            {
-                return true;
-            }
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var h =
+                WindowInfo.FindWindowByProcessAndTitle(
+                    processName,
+                    title);
+
+            if (h != IntPtr.Zero)
+                return h;
 
             await Task.Delay(
-                250 * attempt,
+                250,
                 cancellationToken);
         }
 
-        return false;
+        return IntPtr.Zero;
+    }
+
+    private static async Task CloseAnyDialogAsync(
+        string processName,
+        CancellationToken cancellationToken)
+    {
+        IntPtr found =
+            IntPtr.Zero;
+
+        NativeMethods.EnumWindows(
+            (h, _) =>
+            {
+                if (!NativeMethods.IsWindowVisible(h))
+                    return true;
+
+                var s =
+                    WindowInfo.GetSnapshot(h);
+
+                if (!s.ProcessName.Equals(
+                        processName,
+                        StringComparison.OrdinalIgnoreCase))
+                    return true;
+
+                if (!s.ClassName.Equals(
+                        "#32770",
+                        StringComparison.OrdinalIgnoreCase))
+                    return true;
+
+                found = h;
+                return false;
+            },
+            IntPtr.Zero);
+
+        if (found != IntPtr.Zero)
+        {
+            NativeMethods.SendMessage(
+                found,
+                NativeMethods.WM_CLOSE,
+                IntPtr.Zero,
+                IntPtr.Zero);
+
+            await Task.Delay(
+                400,
+                cancellationToken);
+        }
+    }
+
+    private static void MouseWheel(
+        int delta)
+    {
+        Send(
+        [
+            new NativeMethods.INPUT
+            {
+                type =
+                    NativeMethods.INPUT_MOUSE,
+
+                Data =
+                    new NativeMethods.INPUTUNION
+                    {
+                        mi =
+                            new NativeMethods.MOUSEINPUT
+                            {
+                                mouseData =
+                                    unchecked((uint)delta),
+
+                                dwFlags =
+                                    NativeMethods.MOUSEEVENTF_WHEEL
+                            }
+                    }
+            }
+        ]);
+    }
+
+    private static void Click()
+    {
+        Send(
+        [
+            new NativeMethods.INPUT
+            {
+                type =
+                    NativeMethods.INPUT_MOUSE,
+
+                Data =
+                    new NativeMethods.INPUTUNION
+                    {
+                        mi =
+                            new NativeMethods.MOUSEINPUT
+                            {
+                                dwFlags =
+                                    NativeMethods.MOUSEEVENTF_LEFTDOWN
+                            }
+                    }
+            },
+
+            new NativeMethods.INPUT
+            {
+                type =
+                    NativeMethods.INPUT_MOUSE,
+
+                Data =
+                    new NativeMethods.INPUTUNION
+                    {
+                        mi =
+                            new NativeMethods.MOUSEINPUT
+                            {
+                                dwFlags =
+                                    NativeMethods.MOUSEEVENTF_LEFTUP
+                            }
+                    }
+            }
+        ]);
     }
 
     private static void SendKey(
-        ushort virtualKey,
+        ushort key,
         bool ctrl,
         bool shift,
         bool alt)
     {
-        var inputs =
+        var list =
             new List<NativeMethods.INPUT>();
 
         if (ctrl)
-        {
-            inputs.Add(
-                KeyDown(
-                    NativeMethods.VK_CONTROL));
-        }
+            list.Add(KeyDown(NativeMethods.VK_CONTROL));
 
         if (shift)
-        {
-            inputs.Add(
-                KeyDown(
-                    NativeMethods.VK_SHIFT));
-        }
+            list.Add(KeyDown(NativeMethods.VK_SHIFT));
 
         if (alt)
-        {
-            inputs.Add(
-                KeyDown(
-                    NativeMethods.VK_MENU));
-        }
+            list.Add(KeyDown(NativeMethods.VK_MENU));
 
-        inputs.Add(
-            KeyDown(
-                virtualKey));
-
-        inputs.Add(
-            KeyUp(
-                virtualKey));
+        list.Add(KeyDown(key));
+        list.Add(KeyUp(key));
 
         if (alt)
-        {
-            inputs.Add(
-                KeyUp(
-                    NativeMethods.VK_MENU));
-        }
+            list.Add(KeyUp(NativeMethods.VK_MENU));
 
         if (shift)
-        {
-            inputs.Add(
-                KeyUp(
-                    NativeMethods.VK_SHIFT));
-        }
+            list.Add(KeyUp(NativeMethods.VK_SHIFT));
 
         if (ctrl)
-        {
-            inputs.Add(
-                KeyUp(
-                    NativeMethods.VK_CONTROL));
-        }
+            list.Add(KeyUp(NativeMethods.VK_CONTROL));
 
         Send(
-            inputs.ToArray());
-    }
-
-    private static async Task PasteYesterdayAsync(
-        string format,
-        CancellationToken cancellationToken)
-    {
-        var value =
-            DateTime.Today
-                .AddDays(-1)
-                .ToString(
-                    string.IsNullOrWhiteSpace(
-                        format)
-                        ? "dd/MM/yyyy"
-                        : format);
-
-        Console.WriteLine(
-            $"      Fecha calculada: {value}");
-
-        ClipboardHelper.SetText(
-            value);
-
-        // El campo Fecha debe seguir con foco por el clic anterior.
-        SendKey(
-            NativeMethods.VK_A,
-            ctrl: true,
-            shift: false,
-            alt: false);
-
-        await Task.Delay(
-            120,
-            cancellationToken);
-
-        SendKey(
-            NativeMethods.VK_V,
-            ctrl: true,
-            shift: false,
-            alt: false);
-
-        await Task.Delay(
-            250,
-            cancellationToken);
-
-        ClipboardHelper.TryClear();
+            list.ToArray());
     }
 
     private static NativeMethods.INPUT KeyDown(
@@ -373,13 +794,7 @@ public sealed class WorkflowRunner
                     ki =
                         new NativeMethods.KEYBDINPUT
                         {
-                            wVk =
-                                key,
-
-                            dwFlags =
-                                IsExtendedKey(key)
-                                    ? NativeMethods.KEYEVENTF_EXTENDEDKEY
-                                    : 0
+                            wVk = key
                         }
                 }
         };
@@ -397,59 +812,13 @@ public sealed class WorkflowRunner
                     ki =
                         new NativeMethods.KEYBDINPUT
                         {
-                            wVk =
-                                key,
+                            wVk = key,
 
                             dwFlags =
-                                NativeMethods.KEYEVENTF_KEYUP |
-                                (IsExtendedKey(key)
-                                    ? NativeMethods.KEYEVENTF_EXTENDEDKEY
-                                    : 0)
+                                NativeMethods.KEYEVENTF_KEYUP
                         }
                 }
         };
-
-    private static void Click()
-    {
-        Send(new[]
-        {
-            new NativeMethods.INPUT
-            {
-                type =
-                    NativeMethods.INPUT_MOUSE,
-
-                Data =
-                    new NativeMethods.INPUTUNION
-                    {
-                        mi =
-                            new NativeMethods.MOUSEINPUT
-                            {
-                                dwFlags =
-                                    NativeMethods
-                                        .MOUSEEVENTF_LEFTDOWN
-                            }
-                    }
-            },
-
-            new NativeMethods.INPUT
-            {
-                type =
-                    NativeMethods.INPUT_MOUSE,
-
-                Data =
-                    new NativeMethods.INPUTUNION
-                    {
-                        mi =
-                            new NativeMethods.MOUSEINPUT
-                            {
-                                dwFlags =
-                                    NativeMethods
-                                        .MOUSEEVENTF_LEFTUP
-                            }
-                    }
-            }
-        });
-    }
 
     private static void Send(
         NativeMethods.INPUT[] inputs)
@@ -458,94 +827,10 @@ public sealed class WorkflowRunner
             NativeMethods.SendInput(
                 (uint)inputs.Length,
                 inputs,
-                Marshal.SizeOf<
-                    NativeMethods.INPUT>());
+                Marshal.SizeOf<NativeMethods.INPUT>());
 
-        if (sent !=
-            inputs.Length)
-        {
+        if (sent != inputs.Length)
             throw new InvalidOperationException(
-                $"Windows envió {sent}/{inputs.Length} eventos.");
-        }
+                $"SendInput {sent}/{inputs.Length}");
     }
-
-    private static string Display(
-        string value) =>
-        string.IsNullOrWhiteSpace(
-            value)
-            ? "(sin título)"
-            : value;
-
-    private static bool IsExtendedKey(
-        ushort key)
-    {
-        return key switch
-        {
-            0x21 => true, // Page Up
-            0x22 => true, // Page Down
-            0x23 => true, // End
-            0x24 => true, // Home
-
-            0x25 => true, // Left
-            0x26 => true, // Up
-            0x27 => true, // Right
-            0x28 => true, // Down
-
-            0x2D => true, // Insert
-            0x2E => true, // Delete
-
-            _ => false
-        };
-    }
-
-    private static async Task SendKeyToLastControlAsync(
-        ushort virtualKey,
-        bool ctrl,
-        bool shift,
-        bool alt,
-        CancellationToken cancellationToken)
-    {
-        Console.WriteLine(
-            $"      Enviando VK=0x{virtualKey:X2} " +
-            $"a HWND=0x{_lastInputTarget.ToInt64():X}");
-
-        if (_lastInputTarget != IntPtr.Zero &&
-            !ctrl &&
-            !shift &&
-            !alt)
-        {
-            NativeMethods.SendMessage(
-                _lastInputTarget,
-                NativeMethods.WM_KEYDOWN,
-                new IntPtr(virtualKey),
-                IntPtr.Zero);
-
-            await Task.Delay(
-                100,
-                cancellationToken);
-
-            NativeMethods.SendMessage(
-                _lastInputTarget,
-                NativeMethods.WM_KEYUP,
-                new IntPtr(virtualKey),
-                IntPtr.Zero);
-
-            await Task.Delay(
-                120,
-                cancellationToken);
-
-            return;
-        }
-
-        // Fallback para texto y combinaciones Ctrl/Shift/Alt.
-        SendKey(
-            virtualKey,
-            ctrl,
-            shift,
-            alt);
-
-        await Task.Delay(
-            120,
-            cancellationToken);
-    }        
 }

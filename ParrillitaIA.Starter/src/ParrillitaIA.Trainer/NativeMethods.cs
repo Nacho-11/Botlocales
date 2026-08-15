@@ -43,6 +43,7 @@ internal static class NativeMethods
     internal const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     internal const uint MOUSEEVENTF_LEFTUP = 0x0004;
     internal const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
+    internal const uint MOUSEEVENTF_WHEEL = 0x0800;
 
     internal const uint KEYEVENTF_KEYUP = 0x0002;
     internal const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
@@ -297,5 +298,36 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     internal static extern IntPtr WindowFromPoint(
-        POINT point);    
+        POINT point);
+
+    [DllImport("user32.dll")]
+    internal static extern IntPtr ChildWindowFromPoint(
+        IntPtr hWndParent,
+        POINT point);
+        
+    [DllImport("user32.dll")]
+    internal static extern IntPtr GetParent(IntPtr hWnd);
+    
+    [DllImport("user32.dll")]
+    internal static extern IntPtr GetDC(
+        IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    internal static extern int ReleaseDC(
+        IntPtr hWnd,
+        IntPtr hDC);
+
+    [DllImport("gdi32.dll")]
+    internal static extern uint GetPixel(
+        IntPtr hdc,
+        int nXPos,
+        int nYPos); 
+
+    // ===== V371 CIERRES DINÁMICOS =====
+    internal const uint BM_CLICK = 0x00F5;
+
+
+    [DllImport("user32.dll")]
+    internal static extern IntPtr SetFocus(IntPtr hWnd);
+
 }
