@@ -82,6 +82,61 @@ internal static class ClipboardHelper
         }
     }
 
+
+
+    public static string GetText()
+    {
+        var opened = false;
+
+        try
+        {
+            for (var attempt = 1; attempt <= 10; attempt++)
+            {
+                if (NativeMethods.OpenClipboard(IntPtr.Zero))
+                {
+                    opened = true;
+                    break;
+                }
+
+                Thread.Sleep(30 * attempt);
+            }
+
+            if (!opened)
+                return string.Empty;
+
+            var handle =
+                NativeMethods.GetClipboardData(
+                    NativeMethods.CF_UNICODETEXT);
+
+            if (handle == IntPtr.Zero)
+                return string.Empty;
+
+            var pointer =
+                NativeMethods.GlobalLock(handle);
+
+            if (pointer == IntPtr.Zero)
+                return string.Empty;
+
+            try
+            {
+                return Marshal.PtrToStringUni(pointer)
+                    ?? string.Empty;
+            }
+            finally
+            {
+                NativeMethods.GlobalUnlock(handle);
+            }
+        }
+        catch
+        {
+            return string.Empty;
+        }
+        finally
+        {
+            if (opened)
+                NativeMethods.CloseClipboard();
+        }
+    }
     public static void TryClear()
     {
         try

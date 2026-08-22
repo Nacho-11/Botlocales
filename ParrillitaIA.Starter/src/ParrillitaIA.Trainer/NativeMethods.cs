@@ -18,6 +18,17 @@ internal static class NativeMethods
     internal const uint WM_SETFOCUS = 0x0007;
     internal const uint WM_CLOSE = 0x0010;
 
+    // ComboBox (Win32/VB6 compatible)
+    internal const uint CB_GETCOUNT = 0x0146;
+    internal const uint CB_GETCURSEL = 0x0147;
+    internal const uint CB_GETLBTEXT = 0x0148;
+    internal const uint CB_GETLBTEXTLEN = 0x0149;
+    internal const uint CB_SETCURSEL = 0x014E;
+    internal const int CB_ERR = -1;
+
+    internal const uint WM_COMMAND = 0x0111;
+    internal const int CBN_SELCHANGE = 1;
+
     internal const uint MOD_CONTROL = 0x0002;
     internal const uint MOD_SHIFT = 0x0004;
 
@@ -233,6 +244,13 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     internal static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    internal static extern IntPtr SendMessage(
+        IntPtr hWnd,
+        uint msg,
+        IntPtr wParam,
+        StringBuilder lParam);
+
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool RegisterHotKey(
@@ -271,6 +289,9 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern IntPtr SetClipboardData(uint uFormat, IntPtr hMem);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern IntPtr GetClipboardData(uint uFormat);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     internal static extern IntPtr GlobalAlloc(uint uFlags, UIntPtr dwBytes);
 
@@ -307,6 +328,9 @@ internal static class NativeMethods
         
     [DllImport("user32.dll")]
     internal static extern IntPtr GetParent(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    internal static extern int GetDlgCtrlID(IntPtr hWnd);
     
     [DllImport("user32.dll")]
     internal static extern IntPtr GetDC(
