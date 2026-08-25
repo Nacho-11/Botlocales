@@ -46,7 +46,7 @@ public sealed class WorkflowRunner
     {
         Console.WriteLine();
         Console.WriteLine(
-            "=== CIERRES V3.8.6 - COMBOBOX ENUMERADO + USUARIOS REVISADOS ===");
+            "=== CIERRES V3.8.7 - RECORRIDO ESTRICTO SIN SALTOS ===");
 
         var excelPidsBeforeRun =
             Process.GetProcessesByName("EXCEL")
@@ -188,8 +188,24 @@ public sealed class WorkflowRunner
 
             var maxIterations =
                 comboCount > 0
-                    ? Math.Min(comboCount, MaxUsers)
+                    ? comboCount
                     : MaxUsers;
+
+            if (comboCount > 0)
+            {
+                Console.WriteLine("[USUARIOS] Orden exacto detectado en el ComboBox:");
+
+                for (var i = 0; i < comboCount; i++)
+                {
+                    var itemText =
+                        GetComboItemText(
+                            userCombo,
+                            i);
+
+                    Console.WriteLine(
+                        $"  #{i + 1}: {(string.IsNullOrWhiteSpace(itemText) ? "(sin texto)" : itemText)}");
+                }
+            }
 
             var consecutiveDuplicates = 0;
 
@@ -212,9 +228,20 @@ public sealed class WorkflowRunner
                             ordinal,
                             cancellationToken);
 
+                    // El nombre se toma del MISMO índice solicitado, no del texto
+                    // visual potencialmente retrasado del ComboBox. Así índice 0 siempre
+                    // corresponde al primer usuario y ningún índice puede "correr" el nombre.
                     currentUser =
-                        TryReadComboSelectedText(
-                            userCombo);
+                        GetComboItemText(
+                            userCombo,
+                            ordinal);
+
+                    if (string.IsNullOrWhiteSpace(currentUser))
+                    {
+                        currentUser =
+                            TryReadComboSelectedText(
+                                userCombo);
+                    }
 
                     if (string.IsNullOrWhiteSpace(currentUser))
                     {
@@ -271,23 +298,24 @@ public sealed class WorkflowRunner
                 var alreadyReviewedByHash =
                     reviewedHashes.Contains(currentHash);
 
-                if (alreadyReviewedByName ||
-                    alreadyReviewedByHash)
+                // Si tenemos un ComboBox enumerado, el índice es la fuente de verdad:
+                // se procesa 0..Count-1 SIN omitir ninguno, aunque una captura visual
+                // produzca una huella repetida por retraso de repintado.
+                // En el fallback visual, la huella solo se usa si NO logramos leer nombre;
+                // dos usuarios distintos pueden tener una captura muy parecida.
+                var alreadyReviewed =
+                    comboCount <= 0 &&
+                    (alreadyReviewedByName ||
+                     (string.IsNullOrWhiteSpace(safeName) && alreadyReviewedByHash));
+
+                if (alreadyReviewed)
                 {
                     consecutiveDuplicates++;
 
                     Console.WriteLine(
-                        $"[USUARIOS] Usuario ya revisado. " +
+                        $"[USUARIOS] Selección repetida en fallback. " +
                         $"Nombre={(string.IsNullOrWhiteSpace(safeName) ? "(no legible)" : safeName)} " +
-                        $"Huella=0x{currentHash:X16}. Se omite.");
-
-                    if (comboCount <= 0 &&
-                        consecutiveDuplicates >= 4)
-                    {
-                        Console.WriteLine(
-                            "[USUARIOS] FIN: 4 selecciones consecutivas ya estaban revisadas.");
-                        break;
-                    }
+                        $"Huella=0x{currentHash:X16}. Se omite esta repetición.");
 
                     continue;
                 }
@@ -437,7 +465,7 @@ public sealed class WorkflowRunner
             }
 
             Console.WriteLine();
-            Console.WriteLine("=== RESUMEN V386 ===");
+            Console.WriteLine("=== RESUMEN V387 ===");
             Console.WriteLine(
                 $"Usuarios revisados en orden: {usersChecked}");
             Console.WriteLine(
@@ -1018,11 +1046,72 @@ public sealed class WorkflowRunner
             combo);
 
         await Task.Delay(
-            350,
+            450,
             cancellationToken);
 
+        var actualIndex =
+            NativeMethods.SendMessage(
+                combo,
+                NativeMethods.CB_GETCURSEL,
+                IntPtr.Zero,
+                IntPtr.Zero)
+            .ToInt32();
+
+        if (actualIndex != index)
+        {
+            // Un segundo intento controlado evita continuar con una selección vieja.
+            NativeMethods.SendMessage(
+                combo,
+                NativeMethods.CB_SETCURSEL,
+                new IntPtr(index),
+                IntPtr.Zero);
+
+            if (parent != IntPtr.Zero)
+            {
+                var controlId =
+                    NativeMethods.GetDlgCtrlID(
+                        combo);
+
+                var wParam =
+                    new IntPtr(
+                        (controlId & 0xFFFF) |
+                        ((NativeMethods.CBN_SELCHANGE & 0xFFFF) << 16));
+
+                NativeMethods.SendMessage(
+                    parent,
+                    NativeMethods.WM_COMMAND,
+                    wParam,
+                    combo);
+            }
+
+            await Task.Delay(
+                450,
+                cancellationToken);
+
+            actualIndex =
+                NativeMethods.SendMessage(
+                    combo,
+                    NativeMethods.CB_GETCURSEL,
+                    IntPtr.Zero,
+                    IntPtr.Zero)
+                .ToInt32();
+        }
+
+        if (actualIndex != index)
+        {
+            throw new InvalidOperationException(
+                $"No se pudo fijar exactamente el usuario #{index + 1}. " +
+                $"Índice solicitado={index}; índice real={actualIndex}.");
+        }
+
+        var exactText =
+            GetComboItemText(
+                combo,
+                index);
+
         Console.WriteLine(
-            $"[USUARIOS] Índice ComboBox seleccionado: {index + 1}.");
+            $"[USUARIOS] Índice exacto confirmado: {index + 1}/{GetComboItemCount(combo)} " +
+            $"-> {(string.IsNullOrWhiteSpace(exactText) ? "(sin texto)" : exactText)}.");
 
         return selection;
     }
@@ -1032,135 +1121,60 @@ public sealed class WorkflowRunner
         int index,
         CancellationToken cancellationToken)
     {
-        // V3.8.5:
-        // NO dependemos de HOME/DOWN del teclado porque el ComboBox legacy
-        // de SoftRestaurant no siempre conserva el foco del listado.
-        //
-        // Para CADA usuario:
-        // 1) abrimos la lista,
-        // 2) hacemos scroll físico hasta ARRIBA,
-        // 3) partimos siempre desde el primer elemento,
-        // 4) avanzamos exactamente hasta el índice solicitado,
-        // 5) hacemos click en esa fila.
-        //
-        // De esta forma el recorrido es determinista:
-        // índice 0, 1, 2, 3 ... hasta que la selección deja de cambiar.
+        // V3.8.7 fallback estricto:
+        // el wheel de Windows NO equivale a una fila; normalmente una muesca puede
+        // desplazar 3 líneas y por eso se podían brincar usuarios.
+        // Aquí cada selección siempre parte del inicio con HOME y avanza exactamente
+        // un usuario por cada VK_DOWN. Finalmente ENTER confirma la fila.
 
         var selection =
             await FocusUserSelectorAsync(
                 anchor,
                 cancellationToken);
 
-        var listX =
-            selection.AnchorX +
-            InsideListOffsetX;
-
-        var listTopY =
-            selection.AnchorY +
-            FirstRowOffsetY;
-
-        // Colocar el mouse DENTRO de la lista desplegada.
-        NativeMethods.SetCursorPos(
-            listX,
-            listTopY);
-
-        await Task.Delay(
-            120,
-            cancellationToken);
-
-        Console.WriteLine(
-            $"[USUARIOS] Volviendo físicamente al inicio de la lista para índice {index}.");
-
-        // Subir mucho más de lo necesario: Windows simplemente se detiene
-        // al llegar al primer elemento. Esto garantiza que siempre partimos
-        // desde el usuario #1, independientemente de dónde quedó el ComboBox.
-        for (var i = 0; i < 80; i++)
-        {
-            MouseWheel(+120);
-
-            await Task.Delay(
-                8,
-                cancellationToken);
-        }
-
-        await Task.Delay(
-            220,
-            cancellationToken);
-
-        // Si el usuario cabe en la parte visible desde el inicio,
-        // hacemos click directo en su fila.
-        if (index < VisibleRows)
-        {
-            var rowY =
-                listTopY +
-                index *
-                RowHeight;
-
-            Console.WriteLine(
-                $"[USUARIOS] Desde PRIMERO -> fila absoluta #{index + 1} " +
-                $"click=({listX},{rowY}).");
-
-            NativeMethods.SetCursorPos(
-                listX,
-                rowY);
-
-            await Task.Delay(
-                120,
-                cancellationToken);
-
-            Click();
-
-            await Task.Delay(
-                450,
-                cancellationToken);
-
-            return selection;
-        }
-
-        // Para índices posteriores mantenemos la última fila visible
-        // como referencia y bajamos exactamente una posición por wheel.
-        var scrollSteps =
-            index -
-            (VisibleRows - 1);
-
-        var bottomRowY =
-            listTopY +
-            (VisibleRows - 1) *
-            RowHeight;
-
-        NativeMethods.SetCursorPos(
-            listX,
-            bottomRowY);
-
-        Console.WriteLine(
-            $"[USUARIOS] Desde PRIMERO -> bajar {scrollSteps} posición(es) " +
-            $"y seleccionar fila absoluta #{index + 1}.");
-
-        for (var i = 0; i < scrollSteps; i++)
-        {
-            MouseWheel(-120);
-
-            await Task.Delay(
-                110,
-                cancellationToken);
-        }
+        NativeMethods.SetForegroundWindow(
+            selection.Window);
 
         await Task.Delay(
             180,
             cancellationToken);
 
-        NativeMethods.SetCursorPos(
-            listX,
-            bottomRowY);
+        Console.WriteLine(
+            $"[USUARIOS] Fallback exacto: HOME + DOWN x{index} + ENTER -> usuario #{index + 1}.");
+
+        SendKey(
+            0x24, // VK_HOME
+            false,
+            false,
+            false);
 
         await Task.Delay(
-            120,
+            180,
             cancellationToken);
 
-        Click();
+        for (var i = 0; i < index; i++)
+        {
+            SendKey(
+                0x28, // VK_DOWN
+                false,
+                false,
+                false);
+
+            // Pausa corta para que el ComboBox VB6 no pierda eventos cuando
+            // se mandan varias flechas seguidas.
+            await Task.Delay(
+                55,
+                cancellationToken);
+        }
+
+        SendKey(
+            0x0D, // ENTER
+            false,
+            false,
+            false);
 
         await Task.Delay(
-            450,
+            500,
             cancellationToken);
 
         return selection;
@@ -1585,6 +1599,48 @@ public sealed class WorkflowRunner
             $"[USUARIO] No se logró leer el ComboBox en ({selection.AnchorX},{selection.AnchorY}).");
 
         return string.Empty;
+    }
+
+    private static string GetComboItemText(
+        IntPtr combo,
+        int index)
+    {
+        if (combo == IntPtr.Zero || index < 0)
+            return string.Empty;
+
+        try
+        {
+            var length =
+                NativeMethods.SendMessage(
+                    combo,
+                    NativeMethods.CB_GETLBTEXTLEN,
+                    new IntPtr(index),
+                    IntPtr.Zero)
+                .ToInt32();
+
+            if (length <= 0 || length > 256)
+                return string.Empty;
+
+            var buffer =
+                new StringBuilder(length + 2);
+
+            var copied =
+                NativeMethods.SendMessage(
+                    combo,
+                    NativeMethods.CB_GETLBTEXT,
+                    new IntPtr(index),
+                    buffer)
+                .ToInt32();
+
+            if (copied == NativeMethods.CB_ERR || copied <= 0)
+                return string.Empty;
+
+            return buffer.ToString().Trim();
+        }
+        catch
+        {
+            return string.Empty;
+        }
     }
 
     private static string TryReadComboSelectedText(
