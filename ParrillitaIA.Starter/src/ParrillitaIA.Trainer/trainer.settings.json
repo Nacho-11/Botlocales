@@ -1,0 +1,20 @@
+{
+  "SoftRestaurant": {
+    "ExecutablePath": "C:\\Program Files (x86)\\Softrestaurant11\\softrestaurant.exe",
+    "ProcessName": "softrestaurant",
+    "StableWindowTitle": "SOFT RESTAURANT",
+    "LoginWindowTitle": "Inicio de sesión",
+    "Username": "",
+    "LaunchTimeoutSeconds": 30,
+    "LoginTimeoutSeconds": 20,
+
+    "LoginUsernameX": 0.44,
+    "LoginUsernameY": 0.37,
+
+    "LoginPasswordX": 0.44,
+    "LoginPasswordY": 0.54,
+
+    "LoginButtonX": 0.53,
+    "LoginButtonY": 0.80
+  }
+}

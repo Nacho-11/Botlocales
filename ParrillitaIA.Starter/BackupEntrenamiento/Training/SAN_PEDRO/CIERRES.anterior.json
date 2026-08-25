@@ -1,0 +1,41 @@
+{
+  "version": 21,
+  "local": "SAN_PEDRO",
+  "name": "CIERRES",
+  "targetProcessName": "softrestaurant",
+  "trainedAt": "2026-08-11T18:19:01.9017114-06:00",
+  "steps": [
+    {
+      "order": 1,
+      "action": "LeftClick",
+      "delayBeforeMs": 300,
+      "processName": "softrestaurant",
+      "windowTitle": "SOFT RESTAURANT  11.0 (01/08/2025) -  LA PARRILLITA DE PEPE  -  USUARIO: CALDERON    -    NC: SR11.002MX14683",
+      "stableTitle": "SOFT RESTAURANT",
+      "windowClass": "softresta9c000000",
+      "screenX": 721,
+      "screenY": 753,
+      "relativeX": 0.7009615384615384,
+      "relativeY": 1,
+      "recordedWindowWidth": 1040,
+      "recordedWindowHeight": 736,
+      "windowWaitTimeoutMs": 15000
+    },
+    {
+      "order": 2,
+      "action": "LeftClick",
+      "delayBeforeMs": 4996,
+      "processName": "softrestaurant",
+      "windowTitle": "SOFT RESTAURANT  11.0 (01/08/2025) -  LA PARRILLITA DE PEPE  -  USUARIO: CALDERON    -    NC: SR11.002MX14683",
+      "stableTitle": "SOFT RESTAURANT",
+      "windowClass": "softresta9c000000",
+      "screenX": 665,
+      "screenY": 737,
+      "relativeX": 0.6471153846153846,
+      "relativeY": 1,
+      "recordedWindowWidth": 1040,
+      "recordedWindowHeight": 736,
+      "windowWaitTimeoutMs": 15000
+    }
+  ]
+}

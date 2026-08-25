@@ -1,0 +1,39 @@
+{
+  "VisibleRows": 10,
+  "FirstRowOffsetY": 20,
+  "RowHeight": 15,
+  "InsideListOffsetX": -40,
+  "WheelDeltaPerStep": -120,
+  "Users": [
+    {
+      "Name": "BOSPINA",
+      "Index": 1,
+      "Enabled": true
+    },
+    {
+      "Name": "SANCHEZ",
+      "Index": 2,
+      "Enabled": true
+    },
+    {
+      "Name": "CALPIZAR",
+      "Index": 3,
+      "Enabled": true
+    },
+    {
+      "Name": "VILLAREAL",
+      "Index": 4,
+      "Enabled": true
+    },
+    {
+      "Name": "ACON",
+      "Index": 5,
+      "Enabled": true
+    },
+    {
+      "Name": "HERRERA",
+      "Index": 6,
+      "Enabled": true
+    }
+  ]
+}

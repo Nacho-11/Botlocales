@@ -1,26 +1,67 @@
+using System.Diagnostics;
 using System.Text;
 
 namespace ParrillitaIA.Trainer;
 
+internal readonly record struct WindowSnapshot(
+    IntPtr Handle,
+    string ProcessName,
+    string Title,
+    string ClassName,
+    int Left,
+    int Top,
+    int Width,
+    int Height);
+
 internal static class WindowInfo
 {
-    public static WindowSnapshot GetForeground()
+    public static WindowSnapshot GetForeground() =>
+        GetSnapshot(NativeMethods.GetForegroundWindow());
+
+    public static WindowSnapshot GetSnapshot(IntPtr handle)
     {
-        var handle = NativeMethods.GetForegroundWindow();
         if (handle == IntPtr.Zero)
-            return WindowSnapshot.Empty;
+            return default;
 
         var title = new StringBuilder(1024);
-        NativeMethods.GetWindowText(handle, title, title.Capacity);
-
         var className = new StringBuilder(512);
-        NativeMethods.GetClassName(handle, className, className.Capacity);
 
-        if (!NativeMethods.GetWindowRect(handle, out var rect))
-            return WindowSnapshot.Empty;
+        NativeMethods.GetWindowText(
+            handle,
+            title,
+            title.Capacity);
+
+        NativeMethods.GetClassName(
+            handle,
+            className,
+            className.Capacity);
+
+        if (!NativeMethods.GetWindowRect(
+                handle,
+                out var rect))
+        {
+            return default;
+        }
+
+        NativeMethods.GetWindowThreadProcessId(
+            handle,
+            out var processId);
+
+        var processName = string.Empty;
+
+        try
+        {
+            processName = Process
+                .GetProcessById((int)processId)
+                .ProcessName;
+        }
+        catch
+        {
+        }
 
         return new WindowSnapshot(
             handle,
+            processName,
             title.ToString(),
             className.ToString(),
             rect.Left,
@@ -29,71 +70,239 @@ internal static class WindowInfo
             rect.Height);
     }
 
-    public static IntPtr FindBestWindow(string title, string className)
+    public static IntPtr FindBestWindow(WorkflowStep step)
     {
-        IntPtr best = IntPtr.Zero;
-        var bestScore = -1;
+        // Primero intentar con la ventana activa.
+        var foreground = GetForeground();
 
-        NativeMethods.EnumWindows((hWnd, _) =>
+        if (foreground.Handle != IntPtr.Zero &&
+            string.Equals(
+                foreground.ProcessName,
+                step.ProcessName,
+                StringComparison.OrdinalIgnoreCase))
         {
-            if (!NativeMethods.IsWindowVisible(hWnd))
+            return foreground.Handle;
+        }
+
+        IntPtr best = IntPtr.Zero;
+        var bestScore = int.MinValue;
+
+        NativeMethods.EnumWindows((handle, _) =>
+        {
+            if (!NativeMethods.IsWindowVisible(handle))
                 return true;
 
-            var currentTitle = new StringBuilder(1024);
-            NativeMethods.GetWindowText(hWnd, currentTitle, currentTitle.Capacity);
+            var current = GetSnapshot(handle);
 
-            var currentClass = new StringBuilder(512);
-            NativeMethods.GetClassName(hWnd, currentClass, currentClass.Capacity);
+            if (current.Handle == IntPtr.Zero)
+                return true;
 
-            var score = 0;
-
-            if (!string.IsNullOrWhiteSpace(title))
-            {
-                if (string.Equals(
-                        currentTitle.ToString(),
-                        title,
-                        StringComparison.OrdinalIgnoreCase))
-                    score += 100;
-                else if (currentTitle.ToString().Contains(
-                             title,
-                             StringComparison.OrdinalIgnoreCase) ||
-                         title.Contains(
-                             currentTitle.ToString(),
-                             StringComparison.OrdinalIgnoreCase))
-                    score += 50;
-            }
-
-            if (!string.IsNullOrWhiteSpace(className) &&
-                string.Equals(
-                    currentClass.ToString(),
-                    className,
+            // La ventana debe pertenecer al mismo proceso.
+            if (!string.Equals(
+                    current.ProcessName,
+                    step.ProcessName,
                     StringComparison.OrdinalIgnoreCase))
             {
-                score += 25;
+                return true;
+            }
+
+            var score = 100;
+
+            // Título estable.
+            if (!string.IsNullOrWhiteSpace(step.StableTitle) &&
+                current.Title.Contains(
+                    step.StableTitle,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                score += 50;
+            }
+
+            // Clase.
+            if (!string.IsNullOrWhiteSpace(step.WindowClass) &&
+                string.Equals(
+                    step.WindowClass,
+                    current.ClassName,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                score += 30;
+            }
+
+            // Tamaño aproximado.
+            if (step.RecordedWindowWidth > 0 &&
+                step.RecordedWindowHeight > 0 &&
+                current.Width > 0 &&
+                current.Height > 0)
+            {
+                var widthDelta =
+                    Math.Abs(
+                        current.Width -
+                        step.RecordedWindowWidth) /
+                    (double)step.RecordedWindowWidth;
+
+                var heightDelta =
+                    Math.Abs(
+                        current.Height -
+                        step.RecordedWindowHeight) /
+                    (double)step.RecordedWindowHeight;
+
+                if (widthDelta <= 0.10 &&
+                    heightDelta <= 0.10)
+                {
+                    score += 20;
+                }
+                else if (widthDelta <= 0.25 &&
+                         heightDelta <= 0.25)
+                {
+                    score += 10;
+                }
             }
 
             if (score > bestScore)
             {
                 bestScore = score;
-                best = hWnd;
+                best = handle;
             }
 
             return true;
         }, IntPtr.Zero);
 
-        return bestScore > 0 ? best : IntPtr.Zero;
+        return best;
     }
-}
 
-internal readonly record struct WindowSnapshot(
-    IntPtr Handle,
-    string Title,
-    string ClassName,
-    int Left,
-    int Top,
-    int Width,
-    int Height)
-{
-    public static WindowSnapshot Empty =>
-        new(IntPtr.Zero, string.Empty, string.Empty, 0, 0, 0, 0);
+    public static IntPtr FindWindowByProcessAndTitle(
+        string processName,
+        string stableTitle)
+    {
+        IntPtr found = IntPtr.Zero;
+
+        NativeMethods.EnumWindows((handle, _) =>
+        {
+            if (!NativeMethods.IsWindowVisible(handle))
+                return true;
+
+            var current = GetSnapshot(handle);
+
+            if (current.Handle == IntPtr.Zero)
+                return true;
+
+            if (!string.Equals(
+                    current.ProcessName,
+                    processName,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (string.IsNullOrWhiteSpace(stableTitle) ||
+                current.Title.Contains(
+                    stableTitle,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                found = handle;
+
+                // Detener búsqueda.
+                return false;
+            }
+
+            return true;
+        }, IntPtr.Zero);
+
+        return found;
+    }
+
+    public static IReadOnlyList<WindowSnapshot> GetVisibleWindowsForProcess(
+        string processName)
+    {
+        var result =
+            new List<WindowSnapshot>();
+
+        var processIds =
+            Process.GetProcesses()
+                .Where(p =>
+                    string.Equals(
+                        p.ProcessName,
+                        processName,
+                        StringComparison.OrdinalIgnoreCase))
+                .Select(p => p.Id)
+                .ToHashSet();
+
+        if (processIds.Count == 0)
+        {
+            return result;
+        }
+
+        NativeMethods.EnumWindows(
+            (hWnd, _) =>
+            {
+                if (!NativeMethods.IsWindowVisible(hWnd))
+                {
+                    return true;
+                }
+
+                NativeMethods.GetWindowThreadProcessId(
+                    hWnd,
+                    out var pid);
+
+                if (!processIds.Contains((int)pid))
+                {
+                    return true;
+                }
+
+                var titleBuilder =
+                    new System.Text.StringBuilder(512);
+
+                NativeMethods.GetWindowText(
+                    hWnd,
+                    titleBuilder,
+                    titleBuilder.Capacity);
+
+                var classBuilder =
+                    new System.Text.StringBuilder(256);
+
+                NativeMethods.GetClassName(
+                    hWnd,
+                    classBuilder,
+                    classBuilder.Capacity);
+
+                if (!NativeMethods.GetWindowRect(
+                        hWnd,
+                        out var rect))
+                {
+                    return true;
+                }
+
+                result.Add(
+                    new WindowSnapshot
+                    {
+                        Handle =
+                            hWnd,
+
+                        ProcessName =
+                            processName,
+
+                        Title =
+                            titleBuilder.ToString(),
+
+                        ClassName =
+                            classBuilder.ToString(),
+
+                        Left =
+                            rect.Left,
+
+                        Top =
+                            rect.Top,
+
+                        Width =
+                            rect.Width,
+
+                        Height =
+                            rect.Height
+                    });
+
+                return true;
+            },
+            IntPtr.Zero);
+
+        return result;
+    }
 }

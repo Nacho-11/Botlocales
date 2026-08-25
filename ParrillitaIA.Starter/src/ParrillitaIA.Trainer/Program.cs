@@ -1,14 +1,10 @@
 using ParrillitaIA.Trainer;
 
-if (!OperatingSystem.IsWindows())
-{
-    Console.Error.WriteLine("ParrillitaIA.Trainer solo funciona en Windows.");
-    return 1;
-}
-
 if (args.Length < 3)
 {
-    Usage();
+    Console.WriteLine(
+        "Uso: ParrillitaIA.Trainer train|test|run|show|calibrate-login|save-credentials LOCAL FLUJO");
+
     return 2;
 }
 
@@ -16,123 +12,267 @@ var command = args[0].Trim().ToLowerInvariant();
 var local = WorkflowName.Sanitize(args[1]);
 var workflow = WorkflowName.Sanitize(args[2]);
 
-var baseDirectory = Path.Combine(
-    Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-    "ParrillitaIA",
-    "Training",
-    local);
+var directory =
+    Path.Combine(
+        Environment.GetFolderPath(
+            Environment.SpecialFolder.CommonApplicationData),
+        "ParrillitaIA",
+        "Training",
+        local);
 
-Directory.CreateDirectory(baseDirectory);
+Directory.CreateDirectory(directory);
 
-var workflowFile = Path.Combine(baseDirectory, $"{workflow}.json");
+var file =
+    Path.Combine(
+        directory,
+        $"{workflow}.json");
+
+var settingsPath =
+    Path.Combine(
+        AppContext.BaseDirectory,
+        "trainer.settings.json");
+
+var settings =
+    TrainerSettings.Load(
+        AppContext.BaseDirectory);
+
+var credentialTarget =
+    $"ParrillitaIA.SoftRestaurant.{local}";
 
 try
 {
-    switch (command)
+    if (command == "save-credentials")
     {
-        case "train":
-        {
-            Console.WriteLine("=== PARRILLITA IA - MODO APRENDIZAJE ===");
-            Console.WriteLine($"Local: {local}");
-            Console.WriteLine($"Flujo: {workflow}");
-            Console.WriteLine($"Archivo: {workflowFile}");
-            Console.WriteLine();
-            Console.WriteLine("Controles globales:");
-            Console.WriteLine("  CTRL + SHIFT + F8  -> iniciar grabación");
-            Console.WriteLine("  CTRL + SHIFT + F9  -> finalizar y guardar");
-            Console.WriteLine();
-            Console.WriteLine("El Trainer registra SOLO clics del mouse.");
-            Console.WriteLine("No captura contraseñas ni texto escrito.");
-            Console.WriteLine();
-            Console.WriteLine("Abre SoftRestaurant y prepara la pantalla inicial.");
-            Console.WriteLine("Cuando estés listo, pulsa CTRL + SHIFT + F8.");
+        Console.WriteLine("=== PARRILLITA IA V3.6.6 - CREDENCIALES ===");
+        Console.Write("Usuario SoftRestaurant: ");
+        var username = Console.ReadLine() ?? string.Empty;
 
-            using var recorder = new WorkflowRecorder(local, workflow);
-            var model = recorder.Record();
+        Console.Write("Contraseña SoftRestaurant: ");
+        var password = ReadSecret();
+        Console.WriteLine();
 
-            WorkflowStore.Save(workflowFile, model);
+        CredentialStore.Save(
+            credentialTarget,
+            username,
+            password);
 
-            Console.WriteLine();
-            Console.WriteLine($"Flujo guardado correctamente: {workflowFile}");
-            Console.WriteLine($"Pasos registrados: {model.Steps.Count}");
-            return 0;
-        }
+        password = string.Empty;
 
-        case "test":
-        case "run":
-        {
-            if (!File.Exists(workflowFile))
-            {
-                Console.Error.WriteLine($"No existe el flujo: {workflowFile}");
-                return 3;
-            }
+        Console.WriteLine(
+            $"Credencial guardada de forma protegida en Windows: {credentialTarget}");
 
-            var model = WorkflowStore.Load(workflowFile);
-            var runner = new WorkflowRunner();
-
-            Console.WriteLine($"Flujo: {model.Local}/{model.Name}");
-            Console.WriteLine($"Pasos: {model.Steps.Count}");
-
-            if (command == "test")
-            {
-                Console.WriteLine();
-                Console.WriteLine("MODO TEST:");
-                Console.WriteLine("Se mostrará cada acción y tendrás 3 segundos antes de iniciar.");
-                Console.WriteLine("Pulsa CTRL+C para cancelar.");
-                await Task.Delay(TimeSpan.FromSeconds(3));
-            }
-
-            await runner.RunAsync(model, CancellationToken.None);
-
-            Console.WriteLine();
-            Console.WriteLine("Flujo finalizado.");
-            return 0;
-        }
-
-        case "show":
-        {
-            if (!File.Exists(workflowFile))
-            {
-                Console.Error.WriteLine($"No existe el flujo: {workflowFile}");
-                return 3;
-            }
-
-            var model = WorkflowStore.Load(workflowFile);
-            Console.WriteLine(WorkflowStore.ToPrettyJson(model));
-            return 0;
-        }
-
-        default:
-            Usage();
-            return 2;
+        return 0;
     }
+
+    if (command == "calibrate-login")
+    {
+        Console.WriteLine("=== PARRILLITA IA TRAINER V3.6.6 ===");
+        Console.WriteLine();
+        Console.WriteLine("Preparando SoftRestaurant para calibrar login...");
+
+        var launcher =
+            new SoftRestaurantLauncher(
+                settings.SoftRestaurant);
+
+        await launcher.EnsureProcessRunningAsync(
+            CancellationToken.None);
+
+        if (launcher.FindLoginWindow() == IntPtr.Zero)
+        {
+            Console.WriteLine(
+                "SoftRestaurant no está mostrando Inicio de sesión.");
+
+            return 4;
+        }
+
+        using var calibrator =
+            new LoginCalibrator(
+                launcher,
+                settingsPath);
+
+        calibrator.Run();
+
+        Console.WriteLine(
+            "Calibración finalizada.");
+
+        return 0;
+    }
+
+    if (command == "train")
+    {
+        Console.WriteLine("=== PARRILLITA IA TRAINER V3.6.6 ===");
+        Console.WriteLine();
+        Console.WriteLine("Preparando SoftRestaurant...");
+
+        var launcher =
+            new SoftRestaurantLauncher(
+                settings.SoftRestaurant);
+
+        await launcher.EnsureProcessRunningAsync(
+            CancellationToken.None);
+
+        var login =
+            new SoftRestaurantLogin(
+                settings.SoftRestaurant,
+                credentialTarget);
+
+        await login.LoginIfNeededAsync(
+            launcher,
+            CancellationToken.None);
+
+        await launcher.WaitUntilReadyForAutomationAsync(
+            CancellationToken.None);
+
+        Console.WriteLine(
+            "SoftRestaurant listo.");
+
+        using var recorder =
+            new WorkflowRecorder(
+                local,
+                workflow);
+
+        var model =
+            recorder.Record();
+
+        WorkflowStore.Save(
+            file,
+            model);
+
+        Console.WriteLine();
+        Console.WriteLine(
+            $"Flujo guardado: {file}");
+
+        Console.WriteLine(
+            $"Proceso objetivo: {model.TargetProcessName}");
+
+        Console.WriteLine(
+            $"Pasos: {model.Steps.Count}");
+
+        return 0;
+    }
+
+    if (!File.Exists(file))
+    {
+        Console.WriteLine(
+            $"No existe el flujo: {file}");
+
+        return 3;
+    }
+
+    var loaded =
+        WorkflowStore.Load(
+            file);
+
+    if (command == "show")
+    {
+        Console.WriteLine(
+            WorkflowStore.Pretty(
+                loaded));
+
+        return 0;
+    }
+
+    if (command is "test" or "run")
+    {
+        Console.WriteLine("=== PARRILLITA IA TRAINER V3.6.6 ===");
+        Console.WriteLine($"Flujo: {loaded.Local}/{loaded.Name}");
+        Console.WriteLine($"Proceso: {loaded.TargetProcessName}");
+        Console.WriteLine($"Pasos: {loaded.Steps.Count}");
+        Console.WriteLine();
+        Console.WriteLine("Preparando SoftRestaurant...");
+
+        var launcher =
+            new SoftRestaurantLauncher(
+                settings.SoftRestaurant);
+
+        await launcher.EnsureProcessRunningAsync(
+            CancellationToken.None);
+
+        var login =
+            new SoftRestaurantLogin(
+                settings.SoftRestaurant,
+                credentialTarget);
+
+        await login.LoginIfNeededAsync(
+            launcher,
+            CancellationToken.None);
+
+        await launcher.WaitUntilReadyForAutomationAsync(
+            CancellationToken.None);
+
+        if (command == "test")
+        {
+            Console.WriteLine(
+                "MODO TEST: inicia en 3 segundos.");
+
+            await Task.Delay(
+                3000);
+        }
+
+        await new WorkflowRunner()
+            .RunAsync(
+                loaded,
+                CancellationToken.None);
+
+        Console.WriteLine();
+        Console.WriteLine(
+            "Flujo finalizado.");
+
+        return 0;
+    }
+
+    Console.WriteLine(
+        $"Comando no reconocido: {command}");
+
+    return 2;
 }
 catch (Exception ex)
 {
-    Console.Error.WriteLine();
-    Console.Error.WriteLine("ERROR:");
-    Console.Error.WriteLine(ex.Message);
+    Console.WriteLine();
+    Console.WriteLine("ERROR:");
+    Console.WriteLine(ex.Message);
+
     return 10;
 }
 
-static void Usage()
+static string ReadSecret()
 {
-    Console.WriteLine("""
-ParrillitaIA.Trainer
+    var result =
+        new System.Text.StringBuilder();
 
-Uso:
-  ParrillitaIA.Trainer train <LOCAL> <FLUJO>
-  ParrillitaIA.Trainer test  <LOCAL> <FLUJO>
-  ParrillitaIA.Trainer run   <LOCAL> <FLUJO>
-  ParrillitaIA.Trainer show  <LOCAL> <FLUJO>
+    while (true)
+    {
+        var key =
+            Console.ReadKey(
+                intercept: true);
 
-Ejemplos:
-  ParrillitaIA.Trainer train SABANA CIERRES
-  ParrillitaIA.Trainer test  SABANA CIERRES
-  ParrillitaIA.Trainer run   SABANA CIERRES
+        if (key.Key ==
+            ConsoleKey.Enter)
+        {
+            break;
+        }
 
-Durante train:
-  CTRL + SHIFT + F8 = empezar
-  CTRL + SHIFT + F9 = terminar y guardar
-""");
+        if (key.Key ==
+            ConsoleKey.Backspace)
+        {
+            if (result.Length > 0)
+            {
+                result.Length--;
+                Console.Write("\b \b");
+            }
+
+            continue;
+        }
+
+        if (!char.IsControl(
+                key.KeyChar))
+        {
+            result.Append(
+                key.KeyChar);
+
+            Console.Write("*");
+        }
+    }
+
+    return result.ToString();
 }
