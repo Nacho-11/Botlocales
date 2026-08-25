@@ -1,0 +1,8 @@
+{
+  "SoftRestaurant": {
+    "ExecutablePath": "C:\\Program Files (x86)\\Softrestaurant11\\softrestaurant.exe",
+    "ProcessName": "softrestaurant",
+    "StableWindowTitle": "SOFT RESTAURANT",
+    "LaunchTimeoutSeconds": 30
+  }
+}
