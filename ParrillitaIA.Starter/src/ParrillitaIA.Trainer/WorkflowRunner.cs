@@ -46,7 +46,7 @@ public sealed class WorkflowRunner
     {
         Console.WriteLine();
         Console.WriteLine(
-            "=== CIERRES V3.8.7 - RECORRIDO ESTRICTO SIN SALTOS ===");
+            "=== CIERRES V5.7 - FECHA AYER ESCRITA EN FOCO INICIAL + RECORRIDO ORDENADO ===");
 
         var excelPidsBeforeRun =
             Process.GetProcessesByName("EXCEL")
@@ -67,6 +67,23 @@ public sealed class WorkflowRunner
                         StringComparison.OrdinalIgnoreCase))
                 ?? throw new InvalidOperationException(
                     "No existe SetYesterdayDate.");
+
+            // Recuperamos el clic real sobre el campo Fecha grabado
+            // antes de SetYesterdayDate. Excluimos MonthView.
+            var dateFocusStep =
+                steps
+                    .Where(x =>
+                        x.Order < dateStep.Order &&
+                        x.Action.Equals(
+                            "LeftClick",
+                            StringComparison.OrdinalIgnoreCase) &&
+                        !x.WindowClass.Contains(
+                            "monthview",
+                            StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(x => x.Order)
+                    .FirstOrDefault()
+                ?? throw new InvalidOperationException(
+                    "No se encontró el clic grabado sobre el campo Fecha.");
 
             var userAnchor =
                 steps.FirstOrDefault(x => x.Order == 6)
@@ -116,6 +133,7 @@ public sealed class WorkflowRunner
 
             await EnsureYesterdaySelectedAsync(
                 dateStep,
+                dateFocusStep,
                 cancellationToken);
 
             var reportDate =
@@ -355,6 +373,7 @@ public sealed class WorkflowRunner
 
                 await EnsureYesterdaySelectedAsync(
                     dateStep,
+                    dateFocusStep,
                     cancellationToken);
 
                 foreach (var step in executeSteps)
@@ -2212,92 +2231,177 @@ public sealed class WorkflowRunner
         }
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SystemTimeNative
+    {
+        public ushort Year;
+        public ushort Month;
+        public ushort DayOfWeek;
+        public ushort Day;
+        public ushort Hour;
+        public ushort Minute;
+        public ushort Second;
+        public ushort Milliseconds;
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageW")]
+    private static extern IntPtr SendMessageSystemTime(
+        IntPtr hWnd,
+        uint msg,
+        IntPtr wParam,
+        ref NativeSystemTime lParam);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeSystemTime
+    {
+        public ushort Year;
+        public ushort Month;
+        public ushort DayOfWeek;
+        public ushort Day;
+        public ushort Hour;
+        public ushort Minute;
+        public ushort Second;
+        public ushort Milliseconds;
+    }
+
+    private const uint DTM_FIRST = 0x1000;
+    private const uint DTM_GETSYSTEMTIME = DTM_FIRST + 1;
+    private const uint DTM_SETSYSTEMTIME = DTM_FIRST + 2;
+    private const int GDT_VALID = 0;
+
     private static async Task EnsureYesterdaySelectedAsync(
         WorkflowStep dateStep,
+        WorkflowStep dateFocusStep,
         CancellationToken cancellationToken)
     {
-        var month =
+        var today = DateTime.Today;
+        var target = today.AddDays(-1).Date;
+        var value = target.ToString("dd/MM/yyyy");
+
+        Console.WriteLine(
+            $"[FECHA] Hoy={today:dd/MM/yyyy}; AYER obligatorio={value}.");
+
+        // V5.7: al abrir "Formas de pago por", SoftRestaurant YA deja
+        // el foco en Fecha. No usamos mouse y no abrimos el calendario.
+        //
+        // En lugar de asumir qué segmento está activo (día/mes/año),
+        // escribimos directamente la fecha de AYER sobre el control que
+        // ya tiene el foco:
+        //
+        //   Ctrl+A -> AYER -> Enter
+        //
+        // Esto también resuelve automáticamente cambios de mes/año:
+        // 01/09/2026 -> 31/08/2026, 01/01/2027 -> 31/12/2026, etc.
+
+        var form =
             await WaitForWindowAsync(
                 dateStep,
                 cancellationToken);
 
-        if (month == IntPtr.Zero)
-            throw new InvalidOperationException(
-                "No apareció MonthView.");
-
-        if (!NativeMethods.GetWindowRect(
-                month,
-                out var rect))
+        if (form == IntPtr.Zero)
         {
             throw new InvalidOperationException(
-                "No se pudo leer MonthView.");
+                "No apareció Formas de pago por para ajustar Fecha.");
         }
 
-        var target =
-            DateTime.Today.AddDays(-1);
+        NativeMethods.SetForegroundWindow(form);
 
-        var first =
-            new DateTime(
-                target.Year,
-                target.Month,
-                1);
-
-        var firstColumn =
-            ((int)first.DayOfWeek + 6) % 7;
-
-        var dayIndex =
-            firstColumn +
-            target.Day -
-            1;
-
-        var row =
-            dayIndex / 7;
-
-        var col =
-            dayIndex % 7;
-
-        const double left = 0.025;
-        const double right = 0.025;
-        const double top = 0.30;
-        const double bottom = 0.97;
-
-        var cw =
-            rect.Width *
-            (1 - left - right) /
-            7.0;
-
-        var ch =
-            rect.Height *
-            (bottom - top) /
-            6.0;
-
-        var x =
-            rect.Left +
-            (int)Math.Round(
-                rect.Width * left +
-                cw * (col + 0.5));
-
-        var y =
-            rect.Top +
-            (int)Math.Round(
-                rect.Height * top +
-                ch * (row + 0.5));
+        // Esperamos a que SoftRestaurant termine de colocar su foco inicial
+        // en el control Fecha. NO hacemos Click(), SetCursorPos() ni HOME.
+        await Task.Delay(
+            900,
+            cancellationToken);
 
         Console.WriteLine(
-            $"Seleccionando AYER {target:dd/MM/yyyy} click=({x},{y})");
+            "[FECHA] Usando el foco inicial de SoftRestaurant; no se mueve el mouse.");
 
-        NativeMethods.SetForegroundWindow(
-            month);
+        ClipboardHelper.SetText(value);
 
-        NativeMethods.SetCursorPos(
-            x,
-            y);
-
-        Click();
+        SendKey(
+            NativeMethods.VK_A,
+            ctrl: true,
+            shift: false,
+            alt: false);
 
         await Task.Delay(
-            500,
+            180,
             cancellationToken);
+
+        SendKey(
+            NativeMethods.VK_V,
+            ctrl: true,
+            shift: false,
+            alt: false);
+
+        await Task.Delay(
+            350,
+            cancellationToken);
+
+        Console.WriteLine(
+            $"[FECHA] AYER escrito en el control enfocado: {value}.");
+
+        SendKey(
+            0x0D, // ENTER
+            ctrl: false,
+            shift: false,
+            alt: false);
+
+        await Task.Delay(
+            600,
+            cancellationToken);
+
+        ClipboardHelper.TryClear();
+
+        Console.WriteLine(
+            $"[FECHA] ENTER enviado para confirmar AYER={value}.");
+    }
+
+    // Compatibilidad para SetYesterdayDate usado fuera del flujo especial CIERRES.
+    private static async Task EnsureYesterdaySelectedAsync(
+        WorkflowStep dateStep,
+        CancellationToken cancellationToken)
+    {
+        var target =
+            DateTime.Today.AddDays(-1)
+                .ToString(
+                    string.IsNullOrWhiteSpace(dateStep.ValueFormat)
+                        ? "dd/MM/yyyy"
+                        : dateStep.ValueFormat);
+
+        ClipboardHelper.SetText(
+            target);
+
+        SendKey(
+            NativeMethods.VK_A,
+            ctrl: true,
+            shift: false,
+            alt: false);
+
+        await Task.Delay(
+            120,
+            cancellationToken);
+
+        SendKey(
+            NativeMethods.VK_V,
+            ctrl: true,
+            shift: false,
+            alt: false);
+
+        await Task.Delay(
+            200,
+            cancellationToken);
+
+        SendKey(
+            0x0D,
+            ctrl: false,
+            shift: false,
+            alt: false);
+
+        await Task.Delay(
+            300,
+            cancellationToken);
+
+        ClipboardHelper.TryClear();
     }
 
     private static ulong CaptureUserFieldFingerprint(
