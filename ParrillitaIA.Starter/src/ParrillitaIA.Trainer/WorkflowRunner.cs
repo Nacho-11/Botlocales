@@ -42,7 +42,7 @@ public sealed class WorkflowRunner
     {
         Console.WriteLine();
         Console.WriteLine(
-            "=== CIERRES V6.7 - FECHA OK + USUARIOS UP 3 Y LUEGO DOWN 1 ===");
+            "=== CIERRES V6.17 - FECHA V6.5 INTACTA + USUARIOS LEFT-DOWN-ENTER ===");
 
         var steps =
             workflow.Steps
@@ -129,11 +129,12 @@ public sealed class WorkflowRunner
         var closuresFound = 0;
         var filesSaved = 0;
 
-        // V6.6.1:
-        // Abrir Usuario, subir hasta el inicio real con flechas y seleccionar
-        // el primer usuario. Sin rueda del mouse y sin clicks por fila.
+        // V6.17:
+        // FECHA permanece exactamente como V6.5.
+        // USUARIO reproduce el entrenamiento nuevo:
+        // LEFT -> DOWN -> ENTER.
         var current =
-            await SelectFirstUserByKeyboardAsync(
+            await SelectFirstUserFromTrainingAsync(
                 userAnchor,
                 cancellationToken);
 
@@ -141,9 +142,6 @@ public sealed class WorkflowRunner
             CaptureUserFieldFingerprint(
                 current.AnchorX,
                 current.AnchorY);
-
-        Console.WriteLine(
-            $"[USUARIOS] Primer usuario real seleccionado. Huella=0x{currentHash:X16}");
 
         for (var ordinal = 0;
              ordinal < MaxUsers;
@@ -218,7 +216,7 @@ public sealed class WorkflowRunner
                 cancellationToken);
 
             var next =
-                await SelectNextUserByKeyboardAsync(
+                await SelectNextUserFromTrainingAsync(
                     userAnchor,
                     currentHash,
                     cancellationToken);
@@ -616,83 +614,38 @@ public sealed class WorkflowRunner
         return root;
     }
 
-    private static async Task<SelectionResult> SelectFirstUserByKeyboardAsync(
+    private static async Task<SelectionResult> SelectFirstUserFromTrainingAsync(
         WorkflowStep anchor,
         CancellationToken cancellationToken)
     {
         var selection =
-            await OpenUserDropdownAsync(
+            await GetUserAnchorAsync(
                 anchor,
                 cancellationToken);
 
         Console.WriteLine(
-            "[USUARIOS] Desde el usuario inicial: UP x3 exactos.");
+            "[USUARIOS] Primer ciclo entrenado: LEFT -> DOWN -> ENTER.");
 
-        // V6.7:
-        // SoftRestaurant abre el selector en un usuario conocido dentro del bloque.
-        // En lugar de ir hasta el inicio absoluto, subimos EXACTAMENTE 3 posiciones
-        // desde donde empieza. A partir de ahí el recorrido será DOWN x1 por usuario.
-        for (var i = 0; i < 3; i++)
-        {
-            SendKey(
-                0x26, // VK_UP
-                false,
-                false,
-                false);
-
-            await Task.Delay(
-                220,
-                cancellationToken);
-
-            Console.WriteLine(
-                $"[USUARIOS] UP {i + 1}/3.");
-        }
-
-        SendKey(
-            0x0D, // ENTER
-            false,
-            false,
-            false);
-
-        await Task.Delay(
-            600,
+        await SendTrainedUserCycleAsync(
             cancellationToken);
-
-        Console.WriteLine(
-            "[USUARIOS] Usuario inicial de recorrido fijado después de UP x3.");
 
         return selection;
     }
 
-    private static async Task<NextUserResult?> SelectNextUserByKeyboardAsync(
+    private static async Task<NextUserResult?> SelectNextUserFromTrainingAsync(
         WorkflowStep anchor,
         ulong currentHash,
         CancellationToken cancellationToken)
     {
         var selection =
-            await OpenUserDropdownAsync(
+            await GetUserAnchorAsync(
                 anchor,
                 cancellationToken);
 
-        // EXACTAMENTE un usuario por iteración, siempre hacia abajo.
-        SendKey(
-            0x28, // VK_DOWN
-            false,
-            false,
-            false);
+        Console.WriteLine(
+            "[USUARIOS] Siguiente usuario: LEFT -> DOWN -> ENTER.");
 
-        await Task.Delay(
-            320,
-            cancellationToken);
-
-        SendKey(
-            0x0D, // ENTER
-            false,
-            false,
-            false);
-
-        await Task.Delay(
-            600,
+        await SendTrainedUserCycleAsync(
             cancellationToken);
 
         var newHash =
@@ -701,12 +654,12 @@ public sealed class WorkflowRunner
                 selection.AnchorY);
 
         Console.WriteLine(
-            $"[USUARIOS] DOWN x1: anterior=0x{currentHash:X16}; nuevo=0x{newHash:X16}");
+            $"[USUARIOS] Cambio visual: anterior=0x{currentHash:X16}; nuevo=0x{newHash:X16}");
 
         if (newHash == currentHash)
         {
             Console.WriteLine(
-                "[USUARIOS] No hubo cambio visual: se alcanzó el último usuario.");
+                "[USUARIOS] No hubo cambio visual después del ciclo; fin de lista.");
 
             return null;
         }
@@ -716,7 +669,46 @@ public sealed class WorkflowRunner
             newHash);
     }
 
-    private static async Task<SelectionResult> OpenUserDropdownAsync(
+    private static async Task SendTrainedUserCycleAsync(
+        CancellationToken cancellationToken)
+    {
+        // El entrenamiento nuevo muestra repetidamente:
+        // LEFT (0x25) -> DOWN (0x28) -> ENTER (0x0D).
+        //
+        // LEFT recupera el foco hacia Usuario después de que ENTER
+        // lo deja en otro control del formulario.
+        SendKey(
+            0x25, // VK_LEFT
+            false,
+            false,
+            false);
+
+        await Task.Delay(
+            220,
+            cancellationToken);
+
+        SendKey(
+            0x28, // VK_DOWN
+            false,
+            false,
+            false);
+
+        await Task.Delay(
+            220,
+            cancellationToken);
+
+        SendKey(
+            0x0D, // VK_RETURN
+            false,
+            false,
+            false);
+
+        await Task.Delay(
+            650,
+            cancellationToken);
+    }
+
+    private static async Task<SelectionResult> GetUserAnchorAsync(
         WorkflowStep anchor,
         CancellationToken cancellationToken)
     {
@@ -726,15 +718,17 @@ public sealed class WorkflowRunner
                 cancellationToken);
 
         if (window == IntPtr.Zero)
+        {
             throw new InvalidOperationException(
-                "No apareció selector Usuario.");
+                "No apareció la ventana que contiene Usuario.");
+        }
 
         if (!NativeMethods.GetWindowRect(
                 window,
                 out var rect))
         {
             throw new InvalidOperationException(
-                "No se pudo leer selector Usuario.");
+                "No se pudo leer la ventana de Usuario.");
         }
 
         var anchorX =
@@ -752,17 +746,13 @@ public sealed class WorkflowRunner
         NativeMethods.SetForegroundWindow(
             window);
 
-        NativeMethods.SetCursorPos(
-            anchorX,
-            anchorY);
-
-        // El mouse solo abre el desplegable; el recorrido es 100% teclado.
-        Click();
-
         await Task.Delay(
-            450,
+            250,
             cancellationToken);
 
+        // IMPORTANTE:
+        // No se hace clic en Usuario en V6.17.
+        // El entrenamiento nuevo fue puramente de teclado.
         return new SelectionResult(
             window,
             anchorX,
