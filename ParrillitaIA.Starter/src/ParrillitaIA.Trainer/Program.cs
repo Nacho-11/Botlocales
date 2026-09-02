@@ -123,6 +123,40 @@ try
         await launcher.WaitUntilReadyForAutomationAsync(
             CancellationToken.None);
 
+        // Para entrenamientos distintos al propio popup, limpiar primero
+        // el popup de arranque usando el entrenamiento ya aprobado.
+        if (!string.Equals(
+                workflow,
+                "STARTUP_POPUP",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            var startupPopupFile =
+                Path.Combine(
+                    directory,
+                    "STARTUP_POPUP.json");
+
+            if (File.Exists(startupPopupFile))
+            {
+                Console.WriteLine(
+                    "[TRAIN] Limpiando popup de arranque con STARTUP_POPUP...");
+
+                var startupPopupWorkflow =
+                    WorkflowStore.Load(
+                        startupPopupFile);
+
+                await new WorkflowRunner()
+                    .RunAsync(
+                        startupPopupWorkflow,
+                        CancellationToken.None);
+
+                await Task.Delay(
+                    800);
+
+                Console.WriteLine(
+                    "[TRAIN] Popup de arranque procesado.");
+            }
+        }
+
         Console.WriteLine(
             "SoftRestaurant listo.");
 
@@ -199,6 +233,56 @@ try
 
         await launcher.WaitUntilReadyForAutomationAsync(
             CancellationToken.None);
+
+        // V6.18.4: el popup de arranque se resuelve con un flujo ENTRENADO,
+        // separado de CIERRES. No hay heurísticas ni coordenadas hardcodeadas
+        // dentro del código productivo.
+        if (!string.Equals(
+                workflow,
+                "STARTUP_POPUP",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            var startupPopupFile =
+                Path.Combine(
+                    directory,
+                    "STARTUP_POPUP.json");
+
+            if (File.Exists(startupPopupFile))
+            {
+                Console.WriteLine(
+                    "[STARTUP] Ejecutando entrenamiento STARTUP_POPUP...");
+
+                var startupPopupWorkflow =
+                    WorkflowStore.Load(
+                        startupPopupFile);
+
+                await new WorkflowRunner()
+                    .RunAsync(
+                        startupPopupWorkflow,
+                        CancellationToken.None);
+
+                Console.WriteLine(
+                    "[STARTUP] Entrenamiento STARTUP_POPUP finalizado.");
+
+                // V6.18.8:
+                // El popup puede bloquear parte de la inicialización real de SoftRestaurant.
+                // Al cerrarlo, esperamos DE NUEVO a que la aplicación quede estable antes
+                // de iniciar OPEN_CIERRES o cualquier otro flujo.
+                Console.WriteLine(
+                    "[STARTUP] Esperando estabilización posterior al popup...");
+
+                await launcher.WaitUntilReadyForAutomationAsync(
+                    CancellationToken.None);
+
+                Console.WriteLine(
+                    "[STARTUP] SoftRestaurant estable después del popup.");
+            }
+            else
+            {
+                Console.WriteLine(
+                    "[STARTUP] No existe STARTUP_POPUP.json; se continúa sin acción de popup.");
+            }
+        }
 
         if (command == "test")
         {
