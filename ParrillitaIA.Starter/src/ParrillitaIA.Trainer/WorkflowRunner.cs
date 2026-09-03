@@ -42,7 +42,7 @@ public sealed class WorkflowRunner
     {
         Console.WriteLine();
         Console.WriteLine(
-            "=== CIERRES V6.18.6 - FECHA V6.5 INTACTA + OPEN_CIERRES SIN REFOCUS + DIAGNOSTICO COMBOBOX ===");
+            "=== CIERRES V6.18.7 - FECHA V6.5 INTACTA + OPEN_CIERRES REPLAY GENERICO + DIAGNOSTICO COMBOBOX ===");
 
         var steps =
             workflow.Steps
@@ -98,9 +98,14 @@ public sealed class WorkflowRunner
                 WorkflowStore.Load(
                     openClosuresFile);
 
-            await ExecuteOpenClosuresWorkflowAsync(
-                openClosuresWorkflow,
-                cancellationToken);
+            // V6.18.7:
+            // Reproducir OPEN_CIERRES con EXACTAMENTE el mismo motor genérico
+            // usado para cualquier entrenamiento normal. Sin implementación
+            // especial de clics, foco, delays o resolución de ventana.
+            await new WorkflowRunner()
+                .RunAsync(
+                    openClosuresWorkflow,
+                    cancellationToken);
 
             Console.WriteLine(
                 "[CIERRES] OPEN_CIERRES finalizado.");
@@ -1176,113 +1181,6 @@ public sealed class WorkflowRunner
         {
             throw new InvalidOperationException(
                 "No se detectó MonthView.");
-        }
-    }
-
-    private static async Task ExecuteOpenClosuresWorkflowAsync(
-        WorkflowModel workflow,
-        CancellationToken cancellationToken)
-    {
-        var steps =
-            workflow.Steps
-                .OrderBy(x => x.Order)
-                .ToList();
-
-        if (steps.Count == 0)
-        {
-            throw new InvalidOperationException(
-                "OPEN_CIERRES no contiene pasos.");
-        }
-
-        IntPtr mainWindow = IntPtr.Zero;
-
-        foreach (var step in steps)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            await Task.Delay(
-                Math.Clamp(
-                    step.DelayBeforeMs,
-                    100,
-                    30000),
-                cancellationToken);
-
-            var handle =
-                await WaitForWindowAsync(
-                    step,
-                    cancellationToken);
-
-            if (handle == IntPtr.Zero)
-            {
-                throw new InvalidOperationException(
-                    $"OPEN_CIERRES: no apareció la ventana del paso {step.Order}.");
-            }
-
-            if (step.Action.Equals(
-                    "WaitForWindow",
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            if (!step.Action.Equals(
-                    "LeftClick",
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidOperationException(
-                    $"OPEN_CIERRES solo admite LeftClick/WaitForWindow. " +
-                    $"Paso {step.Order}: {step.Action}");
-            }
-
-            if (!NativeMethods.GetWindowRect(
-                    handle,
-                    out var rect))
-            {
-                throw new InvalidOperationException(
-                    $"OPEN_CIERRES: no se pudo leer la ventana del paso {step.Order}.");
-            }
-
-            var x =
-                rect.Left +
-                (int)Math.Round(
-                    rect.Width *
-                    step.RelativeX);
-
-            var y =
-                rect.Top +
-                (int)Math.Round(
-                    rect.Height *
-                    step.RelativeY);
-
-            // CLAVE V6.18.6:
-            // Activar la ventana solo antes del primer clic.
-            // Reenfocar la ventana principal entre clics puede cerrar
-            // el menú desplegable/transitorio que abrió el paso anterior.
-            if (mainWindow == IntPtr.Zero)
-            {
-                mainWindow = handle;
-
-                NativeMethods.SetForegroundWindow(
-                    mainWindow);
-
-                await Task.Delay(
-                    250,
-                    cancellationToken);
-            }
-
-            Console.WriteLine(
-                $"[CIERRES][OPEN] Paso {step.Order}/{steps.Count} " +
-                $"Click=({x},{y}) Delay={step.DelayBeforeMs}ms");
-
-            NativeMethods.SetCursorPos(
-                x,
-                y);
-
-            Click();
-
-            await Task.Delay(
-                200,
-                cancellationToken);
         }
     }
 
