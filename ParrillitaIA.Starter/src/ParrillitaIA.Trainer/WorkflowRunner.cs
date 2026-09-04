@@ -42,7 +42,7 @@ public sealed class WorkflowRunner
     {
         Console.WriteLine();
         Console.WriteLine(
-            "=== CIERRES V6.18.7 - FECHA V6.5 INTACTA + OPEN_CIERRES REPLAY GENERICO + DIAGNOSTICO COMBOBOX ===");
+            "=== CIERRES V6.18.26 - OPEN + FECHA OK + USUARIO POR FILA DIRECTA ===");
 
         var steps =
             workflow.Steps
@@ -98,14 +98,12 @@ public sealed class WorkflowRunner
                 WorkflowStore.Load(
                     openClosuresFile);
 
-            // V6.18.7:
-            // Reproducir OPEN_CIERRES con EXACTAMENTE el mismo motor genérico
-            // usado para cualquier entrenamiento normal. Sin implementación
-            // especial de clics, foco, delays o resolución de ventana.
-            await new WorkflowRunner()
-                .RunAsync(
-                    openClosuresWorkflow,
-                    cancellationToken);
+            // V6.18.9:
+            // Diagnóstico controlado de la apertura de CIERRES.
+            // No modifica fecha, usuarios ni guardado.
+            await OpenClosuresDiagnostic.RunAsync(
+                openClosuresWorkflow,
+                cancellationToken);
 
             Console.WriteLine(
                 "[CIERRES] OPEN_CIERRES finalizado.");
@@ -119,30 +117,6 @@ public sealed class WorkflowRunner
                 await ExecuteGenericStepAsync(step, cancellationToken);
         }
 
-        var mainWindow =
-            WindowInfo.FindWindowByProcessAndTitle(
-                workflow.TargetProcessName,
-                "SOFT RESTAURANT");
-
-        var realMonthView =
-            await SoftRestaurantReportContext.WaitForVisibleMonthViewAsync(
-                workflow.TargetProcessName,
-                mainWindow,
-                15000,
-                cancellationToken);
-
-        if (realMonthView == IntPtr.Zero)
-        {
-            throw new InvalidOperationException(
-                "No se abrió el formulario CIERRES: no apareció un MonthView visible. " +
-                "Si existe OPEN_CIERRES.json, revisa ese entrenamiento; " +
-                "si no existe, se usaron los pasos históricos 1-3.");
-        }
-
-        Console.WriteLine(
-            "[CIERRES] MonthView real: " +
-            SoftRestaurantReportContext.Describe(realMonthView));
-
         await EnsureYesterdaySelectedAsync(
             dateStep,
             cancellationToken);
@@ -151,7 +125,7 @@ public sealed class WorkflowRunner
         // No ejecuta cierres todavía. Primero comprobamos si SoftRestaurant
         // expone el selector como ComboBox/Combo clásico y si podemos leer
         // sus elementos de forma determinista.
-        await RunUserComboDiagnosticAsync(
+        await RunUsersSequentialDiagnosticAsync(
             userAnchor,
             cancellationToken);
 
@@ -159,7 +133,7 @@ public sealed class WorkflowRunner
         Console.WriteLine(
             "[V6.18] Diagnóstico terminado. NO se ejecutaron cierres.");
         Console.WriteLine(
-            "[V6.18] Revisa la lista [USUARIOS][COMBO] en consola.");
+            "[V6.18] Revisa el diagnóstico [USUARIOS][02] en consola.");
 
         // Diagnóstico activo por defecto. Al ser una decisión de runtime,
         // el compilador no marca el código productivo posterior como inaccesible.
@@ -986,112 +960,173 @@ public sealed class WorkflowRunner
         WorkflowStep dateStep,
         CancellationToken cancellationToken)
     {
+        var main =
+            WindowInfo.FindWindowByProcessAndTitle(
+                dateStep.ProcessName,
+                "SOFT RESTAURANT");
+
+        if (main == IntPtr.Zero)
+        {
+            throw new InvalidOperationException(
+                "FECHA: no se encontró la ventana principal de SoftRestaurant.");
+        }
+
+        var picker =
+            FindVisibleDatePicker(
+                main);
+
+        if (picker == IntPtr.Zero)
+        {
+            throw new InvalidOperationException(
+                "FECHA: no se encontró el control DTPicker20WndClass.");
+        }
+
+        if (!NativeMethods.GetWindowRect(
+                picker,
+                out var pickerRect))
+        {
+            throw new InvalidOperationException(
+                "FECHA: no se pudo leer la geometría del DTPicker.");
+        }
+
+        Console.WriteLine(
+            $"[FECHA] DTPicker real: HWND=0x{picker.ToInt64():X} " +
+            $"Rect=({pickerRect.Left},{pickerRect.Top},{pickerRect.Width},{pickerRect.Height})");
+
+        NativeMethods.SetForegroundWindow(
+            main);
+
+        await Task.Delay(
+            250,
+            cancellationToken);
+
+        var dropX =
+            pickerRect.Right - 8;
+
+        var dropY =
+            pickerRect.Top +
+            pickerRect.Height / 2;
+
+        Console.WriteLine(
+            $"[FECHA] Abriendo calendario DTPicker en ({dropX},{dropY})...");
+
+        NativeMethods.SetCursorPos(
+            dropX,
+            dropY);
+
+        Click();
+
+        await Task.Delay(
+            250,
+            cancellationToken);
+
         var month =
-            await WaitForWindowAsync(
-                dateStep,
+            await SoftRestaurantReportContext.WaitForVisibleMonthViewAsync(
+                dateStep.ProcessName,
+                main,
+                5000,
                 cancellationToken);
 
         if (month == IntPtr.Zero)
+        {
             throw new InvalidOperationException(
-                "No apareció MonthView.");
+                "FECHA: se hizo clic en el DTPicker, pero no apareció MonthView.");
+        }
 
         if (!NativeMethods.GetWindowRect(
                 month,
                 out var rect))
         {
             throw new InvalidOperationException(
-                "No se pudo leer MonthView.");
+                "FECHA: no se pudo leer MonthView.");
         }
+
+        Console.WriteLine(
+            "[FECHA] MonthView desplegado: " +
+            SoftRestaurantReportContext.Describe(
+                month));
 
         var target =
             DateTime.Today.AddDays(-1);
 
-        var first =
-            new DateTime(
-                target.Year,
-                target.Month,
-                1);
-
-        var firstColumn =
-            ((int)first.DayOfWeek + 6) % 7;
-
-        var dayIndex =
-            firstColumn +
-            target.Day -
-            1;
-
-        var row =
-            dayIndex / 7;
-
-        var col =
-            dayIndex % 7;
-
-        const double left = 0.025;
-        const double right = 0.025;
-        const double top = 0.30;
-        const double bottom = 0.97;
-
-        var cw =
-            rect.Width *
-            (1 - left - right) /
-            7.0;
-
-        var ch =
-            rect.Height *
-            (bottom - top) /
-            6.0;
-
-        var x =
-            rect.Left +
-            (int)Math.Round(
-                rect.Width * left +
-                cw * (col + 0.5));
-
-        // CORRECCION V6.4:
-        // En la prueba real, al intentar seleccionar 25/08/2026
-        // SoftRestaurant terminaba en 01/09/2026.
-        //
-        // 01/09 - 25/08 = EXACTAMENTE 7 dias, es decir UNA FILA.
-        // Por eso mantenemos intacto el calculo horizontal y desplazamos
-        // la coordenada Y exactamente una altura de celda hacia arriba.
-        //
-        // Esto no depende de una cantidad fija de pixeles: usa "ch",
-        // calculado con el tamaño real del MonthView.
-        var originalY =
-            rect.Top +
-            (int)Math.Round(
-                rect.Height * top +
-                ch * (row + 0.5));
-
-        // V6.4 corrigió una fila completa hacia arriba y el resultado
-        // pasó de +7 días a -7 días. Eso confirma que el punto correcto
-        // está exactamente entre ambas posiciones.
-        //
-        // Por tanto V6.5 corrige MEDIA altura de celda hacia arriba.
-        var y =
-            originalY -
-            (int)Math.Round(ch / 2.0);
-
-        Console.WriteLine(
-            $"[FECHA] Hoy={DateTime.Today:dd/MM/yyyy}; AYER={target:dd/MM/yyyy}; " +
-            $"row={row}; col={col}; cellHeight={ch:F1}; " +
-            $"Yoriginal={originalY}; Ymedia={y}; click=({x},{y})");
-
+        // V6.18.14:
+        // El MonthView se abre con la fecha actual del DTPicker seleccionada.
+        // En este flujo ese valor es HOY. Para seleccionar AYER de forma
+        // determinista no usamos coordenadas: LEFT mueve un día atrás y
+        // ENTER confirma/cierra el calendario.
         NativeMethods.SetForegroundWindow(
+            main);
+
+        NativeMethods.SetFocus(
             month);
 
-        NativeMethods.SetCursorPos(
-            x,
-            y);
-
-        Click();
-
         await Task.Delay(
-            650,
+            200,
             cancellationToken);
 
         Console.WriteLine(
-            $"[FECHA] Clic con corrección de media fila aplicado para AYER={target:dd/MM/yyyy}.");
+            $"[FECHA] Seleccionando AYER por teclado: LEFT -> ENTER; " +
+            $"HOY={DateTime.Today:dd/MM/yyyy}; AYER={target:dd/MM/yyyy}");
+
+        SendKey(
+            0x25, // VK_LEFT
+            false,
+            false,
+            false);
+
+        await Task.Delay(
+            250,
+            cancellationToken);
+
+        SendKey(
+            0x0D, // VK_RETURN
+            false,
+            false,
+            false);
+
+        await Task.Delay(
+            750,
+            cancellationToken);
+
+        Console.WriteLine(
+            $"[FECHA][OK] Selección de AYER confirmada por teclado: {target:dd/MM/yyyy}.");
+    }
+
+    private static IntPtr FindVisibleDatePicker(
+        IntPtr mainWindow)
+    {
+        IntPtr found =
+            IntPtr.Zero;
+
+        NativeMethods.EnumChildWindows(
+            mainWindow,
+            (hWnd, _) =>
+            {
+                if (!NativeMethods.IsWindowVisible(hWnd) ||
+                    !NativeMethods.IsWindowEnabled(hWnd))
+                {
+                    return true;
+                }
+
+                var cls =
+                    GetClassName(
+                        hWnd);
+
+                if (!cls.Equals(
+                        "DTPicker20WndClass",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                found =
+                    hWnd;
+
+                return false;
+            },
+            IntPtr.Zero);
+
+        return found;
     }
 
     private static ulong CaptureUserFieldFingerprint(
@@ -1594,6 +1629,608 @@ public sealed class WorkflowRunner
         {
             throw new InvalidOperationException(
                 $"SendInput {sent}/{inputs.Length}");
+        }
+    }
+
+    private static async Task RunClosuresFormControlsDiagnosticAsync(
+        string processName,
+        CancellationToken cancellationToken)
+    {
+        var deadline =
+            DateTimeOffset.UtcNow.AddSeconds(
+                5);
+
+        IntPtr form =
+            IntPtr.Zero;
+
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            form =
+                FindWindowByExactTitle(
+                    processName,
+                    "Formas de pago por turno");
+
+            if (form != IntPtr.Zero)
+                break;
+
+            await Task.Delay(
+                200,
+                cancellationToken);
+        }
+
+        if (form == IntPtr.Zero)
+        {
+            throw new InvalidOperationException(
+                "DIAGNOSTICO FORMULARIO: no se encontró 'Formas de pago por turno'.");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine(
+            "=== DIAGNOSTICO FORMAS DE PAGO POR TURNO / CONTROLES ===");
+
+        Console.WriteLine(
+            "[FORM] " +
+            SoftRestaurantReportContext.Describe(
+                form));
+
+        var controls =
+            new List<FormControlDiagnostic>();
+
+        NativeMethods.EnumChildWindows(
+            form,
+            (hWnd, _) =>
+            {
+                if (!NativeMethods.IsWindowVisible(hWnd))
+                    return true;
+
+                if (!NativeMethods.GetWindowRect(
+                        hWnd,
+                        out var rect))
+                {
+                    return true;
+                }
+
+                controls.Add(
+                    new FormControlDiagnostic(
+                        hWnd,
+                        GetClassName(hWnd),
+                        GetWindowText(hWnd).Trim(),
+                        rect.Left,
+                        rect.Top,
+                        rect.Width,
+                        rect.Height,
+                        NativeMethods.IsWindowEnabled(hWnd)));
+
+                return true;
+            },
+            IntPtr.Zero);
+
+        var ordered =
+            controls
+                .OrderBy(x => x.Top)
+                .ThenBy(x => x.Left)
+                .ThenBy(x => x.ClassName)
+                .ToList();
+
+        Console.WriteLine(
+            $"[FORM] Controles visibles encontrados: {ordered.Count}");
+
+        for (var i = 0;
+            i < ordered.Count;
+            i++)
+        {
+            var c =
+                ordered[i];
+
+            Console.WriteLine(
+                $"[FORM][{i + 1:00}] " +
+                $"HWND=0x{c.Handle.ToInt64():X} " +
+                $"Class=\"{c.ClassName}\" " +
+                $"Text=\"{c.Text}\" " +
+                $"Rect=({c.Left},{c.Top},{c.Width},{c.Height}) " +
+                $"Enabled={c.Enabled}");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine(
+            "[FORM] Diagnóstico terminado. " +
+            "NO se cambiaron Usuario ni Turno.");
+    }
+
+    private static IntPtr FindWindowByExactTitle(
+        string processName,
+        string exactTitle)
+    {
+        IntPtr found =
+            IntPtr.Zero;
+
+        NativeMethods.EnumWindows(
+            (hWnd, _) =>
+            {
+                if (!NativeMethods.IsWindowVisible(hWnd))
+                    return true;
+
+                var snapshot =
+                    WindowInfo.GetSnapshot(
+                        hWnd);
+
+                if (!snapshot.ProcessName.Equals(
+                        processName,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                if (snapshot.Title.Equals(
+                        exactTitle,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    found =
+                        hWnd;
+
+                    return false;
+                }
+
+                return true;
+            },
+            IntPtr.Zero);
+
+        if (found != IntPtr.Zero)
+            return found;
+
+        // En SoftRestaurant este formulario puede ser hijo de la ventana principal.
+        var main =
+            WindowInfo.FindWindowByProcessAndTitle(
+                processName,
+                "SOFT RESTAURANT");
+
+        if (main == IntPtr.Zero)
+            return IntPtr.Zero;
+
+        NativeMethods.EnumChildWindows(
+            main,
+            (hWnd, _) =>
+            {
+                if (!NativeMethods.IsWindowVisible(hWnd))
+                    return true;
+
+                var title =
+                    GetWindowText(
+                        hWnd).Trim();
+
+                if (title.Equals(
+                        exactTitle,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    found =
+                        hWnd;
+
+                    return false;
+                }
+
+                return true;
+            },
+            IntPtr.Zero);
+
+        return found;
+    }
+
+    private readonly record struct FormControlDiagnostic(
+        IntPtr Handle,
+        string ClassName,
+        string Text,
+        int Left,
+        int Top,
+        int Width,
+        int Height,
+        bool Enabled);
+
+    private static async Task RunOwnerDrawUserDiagnosticAsync(
+        WorkflowStep userAnchor,
+        CancellationToken cancellationToken)
+    {
+        var selection =
+            await GetUserAnchorAsync(
+                userAnchor,
+                cancellationToken);
+
+        var x =
+            selection.AnchorX;
+
+        var y =
+            selection.AnchorY;
+
+        Console.WriteLine();
+        Console.WriteLine(
+            "=== DIAGNOSTICO USUARIO OWNER-DRAWN V6.18.16 ===");
+
+        Console.WriteLine(
+            $"[USUARIOS] Anchor entrenado=({x},{y})");
+
+        var under =
+            NativeMethods.WindowFromPoint(
+                new NativeMethods.POINT
+                {
+                    X = x,
+                    Y = y
+                });
+
+        Console.WriteLine(
+            $"[USUARIOS] HWND bajo anchor=0x{under.ToInt64():X} " +
+            $"Clase=\"{GetClassName(under)}\" Texto=\"{GetWindowText(under).Trim()}\"");
+
+        var before =
+            CaptureUserFieldFingerprint(
+                x,
+                y);
+
+        Console.WriteLine(
+            $"[USUARIOS] Huella ANTES=0x{before:X16}");
+
+        Console.WriteLine(
+            "[USUARIOS] Click en caja/flecha de Usuario...");
+
+        NativeMethods.SetCursorPos(
+            x,
+            y);
+
+        Click();
+
+        await Task.Delay(
+            500,
+            cancellationToken);
+
+        var afterClick =
+            CaptureUserFieldFingerprint(
+                x,
+                y);
+
+        Console.WriteLine(
+            $"[USUARIOS] Huella DESPUES CLICK=0x{afterClick:X16}");
+
+        Console.WriteLine(
+            "[USUARIOS] Enviando DOWN x1...");
+
+        SendKey(
+            0x28, // VK_DOWN
+            false,
+            false,
+            false);
+
+        await Task.Delay(
+            500,
+            cancellationToken);
+
+        var afterDown =
+            CaptureUserFieldFingerprint(
+                x,
+                y);
+
+        Console.WriteLine(
+            $"[USUARIOS] Huella DESPUES DOWN=0x{afterDown:X16}");
+
+        Console.WriteLine(
+            "[USUARIOS] Enviando ENTER...");
+
+        SendKey(
+            0x0D, // VK_RETURN
+            false,
+            false,
+            false);
+
+        await Task.Delay(
+            700,
+            cancellationToken);
+
+        var afterEnter =
+            CaptureUserFieldFingerprint(
+                x,
+                y);
+
+        Console.WriteLine(
+            $"[USUARIOS] Huella DESPUES ENTER=0x{afterEnter:X16}");
+
+        var changed =
+            afterEnter != before;
+
+        Console.WriteLine(
+            $"[USUARIOS][RESULTADO] Cambio visual confirmado={changed}");
+
+        if (changed)
+        {
+            Console.WriteLine(
+                "[USUARIOS][OK] La caja de Usuario responde a CLICK -> DOWN -> ENTER.");
+        }
+        else
+        {
+            Console.WriteLine(
+                "[USUARIOS][WARN] No cambió la huella. " +
+                "El siguiente paso será probar LEFT -> DOWN -> ENTER sobre el mismo anchor.");
+        }
+
+        Console.WriteLine(
+            "[USUARIOS] Diagnóstico terminado. No se ejecutaron cierres.");
+    }
+
+    private static async Task RunUsersSequentialDiagnosticAsync(
+        WorkflowStep userAnchor,
+        CancellationToken cancellationToken)
+    {
+        var selection =
+            await GetUserAnchorAsync(
+                userAnchor,
+                cancellationToken);
+
+        var x =
+            selection.AnchorX;
+
+        var y =
+            selection.AnchorY;
+
+        Console.WriteLine();
+        Console.WriteLine(
+            "=== SELECCION DIRECTA DE FILAS USUARIO V6.18.26 ===");
+
+        Console.WriteLine(
+            $"[USUARIOS] Anchor=({x},{y})");
+
+        Console.WriteLine(
+            $"[USUARIOS] Geometría lista: X={x + InsideListOffsetX}; " +
+            $"FirstRowOffsetY={FirstRowOffsetY}; RowHeight={RowHeight}");
+
+        // ------------------------------------------------------------
+        // PRUEBA 1: seleccionar FILA 2 directamente.
+        // En el video actual corresponde visualmente a BOSPINA.
+        // ------------------------------------------------------------
+        await SelectUserRowDirectAsync(
+            x,
+            y,
+            rowIndex: 1,
+            displayOrdinal: 2,
+            cancellationToken);
+
+        Console.WriteLine(
+            "[USUARIOS] Pausa para verificar visualmente la FILA 2...");
+
+        await Task.Delay(
+            2500,
+            cancellationToken);
+
+        // ------------------------------------------------------------
+        // PRUEBA 2: seleccionar FILA 3 directamente.
+        // En el video actual corresponde visualmente a SANCHEZ.
+        // ------------------------------------------------------------
+        await SelectUserRowDirectAsync(
+            x,
+            y,
+            rowIndex: 2,
+            displayOrdinal: 3,
+            cancellationToken);
+
+        Console.WriteLine(
+            "[USUARIOS] Pausa para verificar visualmente la FILA 3...");
+
+        await Task.Delay(
+            2500,
+            cancellationToken);
+
+        Console.WriteLine();
+        Console.WriteLine(
+            "[USUARIOS] V6.18.26 terminado.");
+
+        Console.WriteLine(
+            "[USUARIOS] NO se usaron hashes para decidir éxito.");
+
+        Console.WriteLine(
+            "[USUARIOS] NO se tocó Reporte, Turno, Destino ni Exportación.");
+    }
+
+    private static async Task SelectUserRowDirectAsync(
+        int anchorX,
+        int anchorY,
+        int rowIndex,
+        int displayOrdinal,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        Console.WriteLine();
+        Console.WriteLine(
+            $"[USUARIOS][FILA {displayOrdinal:00}] Abriendo Usuario...");
+
+        NativeMethods.SetCursorPos(
+            anchorX,
+            anchorY);
+
+        Click();
+
+        await Task.Delay(
+            900,
+            cancellationToken);
+
+        var rowX =
+            anchorX +
+            InsideListOffsetX;
+
+        var rowY =
+            anchorY +
+            FirstRowOffsetY +
+            rowIndex *
+            RowHeight;
+
+        Console.WriteLine(
+            $"[USUARIOS][FILA {displayOrdinal:00}] " +
+            $"Click directo en ({rowX},{rowY})");
+
+        NativeMethods.SetCursorPos(
+            rowX,
+            rowY);
+
+        await Task.Delay(
+            500,
+            cancellationToken);
+
+        Click();
+
+        await Task.Delay(
+            1600,
+            cancellationToken);
+
+        Console.WriteLine(
+            $"[USUARIOS][FILA {displayOrdinal:00}] Click completado. " +
+            "Verificar nombre visible en Usuario.");
+    }
+
+    private static ulong CaptureUserDropdownFingerprint(
+        int anchorX,
+        int anchorY)
+    {
+        var hdc =
+            NativeMethods.GetDC(
+                IntPtr.Zero);
+
+        if (hdc == IntPtr.Zero)
+            return 0;
+
+        try
+        {
+            ulong hash =
+                1469598103934665603UL;
+
+            // Zona amplia debajo del campo Usuario. El selector de SoftRestaurant
+            // es owner-drawn y no expone un HWND hijo para la lista.
+            const int left =
+                -150;
+
+            const int top =
+                14;
+
+            const int width =
+                260;
+
+            const int height =
+                150;
+
+            for (var row = 0;
+                 row < 20;
+                 row++)
+            {
+                for (var column = 0;
+                     column < 36;
+                     column++)
+                {
+                    var px =
+                        anchorX +
+                        left +
+                        column *
+                        (width - 1) /
+                        35;
+
+                    var py =
+                        anchorY +
+                        top +
+                        row *
+                        (height - 1) /
+                        19;
+
+                    var pixel =
+                        NativeMethods.GetPixel(
+                            hdc,
+                            px,
+                            py);
+
+                    hash ^=
+                        pixel;
+
+                    hash *=
+                        1099511628211UL;
+                }
+            }
+
+            return hash;
+        }
+        finally
+        {
+            NativeMethods.ReleaseDC(
+                IntPtr.Zero,
+                hdc);
+        }
+    }
+
+        private static ulong CaptureOwnerDrawUserFingerprint(
+        int anchorX,
+        int anchorY)
+    {
+        var hdc =
+            NativeMethods.GetDC(
+                IntPtr.Zero);
+
+        if (hdc == IntPtr.Zero)
+            return 0;
+
+        try
+        {
+            ulong hash =
+                1469598103934665603UL;
+
+            // Región centrada en la caja owner-drawn de Usuario.
+            const int left =
+                -25;
+
+            const int top =
+                -11;
+
+            const int width =
+                175;
+
+            const int height =
+                22;
+
+            for (var row = 0;
+                row < 8;
+                row++)
+            {
+                for (var column = 0;
+                    column < 32;
+                    column++)
+                {
+                    var px =
+                        anchorX +
+                        left +
+                        column *
+                        (width - 1) /
+                        31;
+
+                    var py =
+                        anchorY +
+                        top +
+                        row *
+                        (height - 1) /
+                        7;
+
+                    var pixel =
+                        NativeMethods.GetPixel(
+                            hdc,
+                            px,
+                            py);
+
+                    hash ^=
+                        pixel;
+
+                    hash *=
+                        1099511628211UL;
+                }
+            }
+
+            return hash;
+        }
+        finally
+        {
+            NativeMethods.ReleaseDC(
+                IntPtr.Zero,
+                hdc);
         }
     }
 }
