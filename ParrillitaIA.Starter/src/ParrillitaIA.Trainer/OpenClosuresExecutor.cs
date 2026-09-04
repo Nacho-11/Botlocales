@@ -6,7 +6,6 @@ $ErrorActionPreference = "Stop"
 
 $trainer = Join-Path $RepoRoot "ParrillitaIA.Starter\src\ParrillitaIA.Trainer"
 $runner = Join-Path $trainer "WorkflowRunner.cs"
-$duplicateRunner = Join-Path $trainer "WorkflowRunner..cs"
 $newExecutor = Join-Path $trainer "OpenClosuresExecutor.cs"
 $solution = Join-Path $RepoRoot "ParrillitaIA.Starter\ParrillitaIA.sln"
 
@@ -14,23 +13,11 @@ if (-not (Test-Path $runner)) {
     throw "No se encontró WorkflowRunner.cs en: $runner"
 }
 
-# 1) Quitar el duplicado que declara la misma clase WorkflowRunner.
-if (Test-Path $duplicateRunner) {
-    Remove-Item $duplicateRunner -Force
-    Write-Host "[OK] Eliminado WorkflowRunner..cs duplicado."
-}
-
-# 2) Crear un ejecutor aislado y verificable para OPEN_CIERRES.
 $executorSource = @'
 using System.Text;
 
 namespace ParrillitaIA.Trainer;
 
-/// <summary>
-/// Apertura controlada de Reportes -> Formas de pago por turno.
-/// No reenfoca la ventana principal entre los dos clics y valida
-/// que el estado de la UI cambie antes de continuar.
-/// </summary>
 internal static class OpenClosuresExecutor
 {
     internal static async Task RunAsync(
@@ -60,15 +47,15 @@ internal static class OpenClosuresExecutor
         if (mainWindow == IntPtr.Zero)
         {
             throw new InvalidOperationException(
-                "OPEN_CIERRES: no se encontró la ventana principal de SOFT RESTAURANT.");
+                "OPEN_CIERRES: no se encontró SOFT RESTAURANT.");
         }
 
         if (!NativeMethods.GetWindowRect(
                 mainWindow,
-                out var initialRect))
+                out var rect))
         {
             throw new InvalidOperationException(
-                "OPEN_CIERRES: no se pudo leer la geometría de SOFT RESTAURANT.");
+                "OPEN_CIERRES: no se pudo leer la geometría.");
         }
 
         NativeMethods.SetForegroundWindow(
@@ -78,63 +65,59 @@ internal static class OpenClosuresExecutor
             350,
             cancellationToken);
 
-        var firstPoint =
-            ToScreenPoint(
-                initialRect,
+        var first =
+            ToPoint(
+                rect,
                 clicks[0]);
 
-        var secondPoint =
-            ToScreenPoint(
-                initialRect,
+        var second =
+            ToPoint(
+                rect,
                 clicks[1]);
 
-        var beforeSecond =
-            DescribePointTarget(
-                secondPoint);
+        var before =
+            DescribePoint(
+                second);
 
         Console.WriteLine();
         Console.WriteLine(
-            "[OPEN] Inicio de apertura controlada.");
+            "[OPEN] Inicio apertura controlada");
 
         Console.WriteLine(
-            $"[OPEN] Ventana principal: {Describe(mainWindow)}");
+            $"[OPEN] Principal: {Describe(mainWindow)}");
 
         Console.WriteLine(
-            $"[OPEN] Paso 1 Reportes: ({firstPoint.X},{firstPoint.Y})");
+            $"[OPEN] Paso 1 Reportes: ({first.X},{first.Y})");
 
         Console.WriteLine(
-            $"[OPEN] Antes del paso 1, destino del paso 2: {beforeSecond}");
+            $"[OPEN] Punto 2 antes del clic 1: {before}");
 
-        MoveAndClick(
-            firstPoint);
+        ClickAt(
+            first);
 
-        // No llamar SetForegroundWindow aquí.
-        // Los menús legacy/transitorios pueden cerrarse al cambiar el foco.
-        var menuObservation =
-            await WaitForPointTargetChangeAsync(
-                secondPoint,
-                beforeSecond.Handle,
+        var changed =
+            await WaitForTargetChangeAsync(
+                second,
+                before.Handle,
                 3000,
                 cancellationToken);
 
         Console.WriteLine(
-            $"[OPEN] Estado tras abrir Reportes: {menuObservation.Description}");
+            $"[OPEN] Después del clic 1: {changed.Description}");
 
-        if (!menuObservation.Changed)
+        if (!changed.Changed)
         {
             throw new InvalidOperationException(
-                "OPEN_CIERRES: el clic en Reportes no produjo un cambio detectable " +
-                "en la zona de 'Formas de pago por turno'. " +
-                "Se detiene para no ejecutar el segundo clic a ciegas.");
+                "OPEN_CIERRES: Reportes no produjo un cambio detectable " +
+                "en la zona de Formas de pago por turno.");
         }
 
         Console.WriteLine(
-            $"[OPEN] Paso 2 Formas de pago por turno: ({secondPoint.X},{secondPoint.Y})");
+            $"[OPEN] Paso 2 Formas de pago por turno: ({second.X},{second.Y})");
 
-        // Importante: no reenfocar la ventana principal.
-        // Interactuamos con el punto mientras el menú está abierto.
-        MoveAndClick(
-            secondPoint);
+        // No reenfocar aquí la ventana principal.
+        ClickAt(
+            second);
 
         var monthView =
             await SoftRestaurantReportContext
@@ -146,26 +129,19 @@ internal static class OpenClosuresExecutor
 
         if (monthView == IntPtr.Zero)
         {
-            var afterSecond =
-                DescribePointTarget(
-                    secondPoint);
-
             throw new InvalidOperationException(
-                "OPEN_CIERRES: el menú cambió correctamente después del primer clic, " +
-                "pero después del segundo clic no apareció un MonthView visible. " +
-                $"Destino actual del punto 2: {afterSecond}");
+                "OPEN_CIERRES: el menú reaccionó al primer clic, " +
+                "pero el segundo clic no abrió el formulario.");
         }
 
         Console.WriteLine(
-            $"[OPEN] Formas de pago por turno abierto correctamente. " +
-            $"MonthView={Describe(monthView)}");
+            $"[OPEN] Formulario abierto. MonthView={Describe(monthView)}");
     }
 
-    private static NativeMethods.POINT ToScreenPoint(
+    private static NativeMethods.POINT ToPoint(
         NativeMethods.RECT rect,
-        WorkflowStep step)
-    {
-        return new NativeMethods.POINT
+        WorkflowStep step) =>
+        new()
         {
             X =
                 rect.Left +
@@ -179,11 +155,10 @@ internal static class OpenClosuresExecutor
                     rect.Height *
                     step.RelativeY)
         };
-    }
 
-    private static async Task<PointObservation> WaitForPointTargetChangeAsync(
+    private static async Task<Observation> WaitForTargetChangeAsync(
         NativeMethods.POINT point,
-        IntPtr previousHandle,
+        IntPtr previous,
         int timeoutMs,
         CancellationToken cancellationToken)
     {
@@ -192,7 +167,7 @@ internal static class OpenClosuresExecutor
                 timeoutMs);
 
         PointTarget last =
-            DescribePointTarget(
+            DescribePoint(
                 point);
 
         while (DateTimeOffset.UtcNow < deadline)
@@ -200,40 +175,32 @@ internal static class OpenClosuresExecutor
             cancellationToken.ThrowIfCancellationRequested();
 
             last =
-                DescribePointTarget(
+                DescribePoint(
                     point);
 
-            var popupMenu =
+            var isPopupMenu =
                 last.ClassName.Equals(
                     "#32768",
                     StringComparison.OrdinalIgnoreCase);
 
-            var changed =
-                last.Handle != IntPtr.Zero &&
-                (last.Handle != previousHandle ||
-                 popupMenu);
-
-            if (changed)
+            if (last.Handle != IntPtr.Zero &&
+                (last.Handle != previous ||
+                 isPopupMenu))
             {
-                // Dos observaciones consecutivas reducen falsos positivos
-                // causados por repaint durante la apertura.
                 await Task.Delay(
-                    80,
+                    100,
                     cancellationToken);
 
                 var confirm =
-                    DescribePointTarget(
+                    DescribePoint(
                         point);
 
-                var confirmedPopup =
+                if (confirm.Handle == last.Handle ||
                     confirm.ClassName.Equals(
                         "#32768",
-                        StringComparison.OrdinalIgnoreCase);
-
-                if (confirm.Handle == last.Handle ||
-                    confirmedPopup)
+                        StringComparison.OrdinalIgnoreCase))
                 {
-                    return new PointObservation(
+                    return new Observation(
                         true,
                         confirm.ToString());
                 }
@@ -244,12 +211,12 @@ internal static class OpenClosuresExecutor
                 cancellationToken);
         }
 
-        return new PointObservation(
+        return new Observation(
             false,
             last.ToString());
     }
 
-    private static PointTarget DescribePointTarget(
+    private static PointTarget DescribePoint(
         NativeMethods.POINT point)
     {
         var hwnd =
@@ -260,8 +227,8 @@ internal static class OpenClosuresExecutor
         {
             return new PointTarget(
                 IntPtr.Zero,
-                string.Empty,
-                string.Empty);
+                "",
+                "");
         }
 
         return new PointTarget(
@@ -270,7 +237,7 @@ internal static class OpenClosuresExecutor
             GetWindowText(hwnd));
     }
 
-    private static void MoveAndClick(
+    private static void ClickAt(
         NativeMethods.POINT point)
     {
         if (!NativeMethods.SetCursorPos(
@@ -328,50 +295,44 @@ internal static class OpenClosuresExecutor
         if (sent != inputs.Length)
         {
             throw new InvalidOperationException(
-                $"SendInput solo envió {sent}/{inputs.Length} eventos de mouse.");
+                $"SendInput {sent}/{inputs.Length}");
         }
     }
 
     private static string Describe(
-        IntPtr hwnd)
-    {
-        if (hwnd == IntPtr.Zero)
-            return "HWND=0";
-
-        return
-            $"HWND=0x{hwnd.ToInt64():X} " +
-            $"Class=\"{GetClassName(hwnd)}\" " +
-            $"Text=\"{GetWindowText(hwnd)}\"";
-    }
+        IntPtr hwnd) =>
+        $"HWND=0x{hwnd.ToInt64():X} " +
+        $"Class=\"{GetClassName(hwnd)}\" " +
+        $"Text=\"{GetWindowText(hwnd)}\"";
 
     private static string GetClassName(
         IntPtr hwnd)
     {
-        var buffer =
+        var sb =
             new StringBuilder(
                 256);
 
         NativeMethods.GetClassName(
             hwnd,
-            buffer,
-            buffer.Capacity);
+            sb,
+            sb.Capacity);
 
-        return buffer.ToString();
+        return sb.ToString();
     }
 
     private static string GetWindowText(
         IntPtr hwnd)
     {
-        var buffer =
+        var sb =
             new StringBuilder(
                 512);
 
         NativeMethods.GetWindowText(
             hwnd,
-            buffer,
-            buffer.Capacity);
+            sb,
+            sb.Capacity);
 
-        return buffer.ToString().Trim();
+        return sb.ToString().Trim();
     }
 
     private readonly record struct PointTarget(
@@ -384,60 +345,65 @@ internal static class OpenClosuresExecutor
             $"Class=\"{ClassName}\" Text=\"{Text}\"";
     }
 
-    private readonly record struct PointObservation(
+    private readonly record struct Observation(
         bool Changed,
         string Description);
 }
 '@
 
 Set-Content -Path $newExecutor -Value $executorSource -Encoding UTF8
-Write-Host "[OK] Creado OpenClosuresExecutor.cs"
+Write-Host "[OK] OpenClosuresExecutor.cs creado."
 
-# 3) Cambiar UNA sola llamada en WorkflowRunner.
 $runnerText = Get-Content -Path $runner -Raw
 
-$oldCall = @'
-            await ExecuteOpenClosuresWorkflowAsync(
-                openClosuresWorkflow,
-                cancellationToken);
+$oldBlock = @'
+            // V6.18.7:
+            // Reproducir OPEN_CIERRES con EXACTAMENTE el mismo motor genérico
+            // usado para cualquier entrenamiento normal. Sin implementación
+            // especial de clics, foco, delays o resolución de ventana.
+            await new WorkflowRunner()
+                .RunAsync(
+                    openClosuresWorkflow,
+                    cancellationToken);
 '@
 
-$newCall = @'
+$newBlock = @'
+            // V6.19:
+            // OPEN_CIERRES se ejecuta por estado de UI.
+            // El segundo clic solo se realiza si el primer clic produjo
+            // un cambio real en la ventana/control bajo la opción.
             await OpenClosuresExecutor.RunAsync(
                 openClosuresWorkflow,
                 cancellationToken);
 '@
 
-if (-not $runnerText.Contains($oldCall)) {
-    throw "No encontré la llamada esperada a ExecuteOpenClosuresWorkflowAsync. El repositorio cambió; no se aplicó el reemplazo."
+if (-not $runnerText.Contains($oldBlock)) {
+    throw "No encontré el bloque V6.18.7 esperado. No se modificó WorkflowRunner.cs."
 }
 
-$runnerText = $runnerText.Replace($oldCall, $newCall)
+$runnerText = $runnerText.Replace($oldBlock, $newBlock)
 
-# Cambiar solo el texto de diagnóstico, sin tocar lógica de fecha/usuario.
 $runnerText = $runnerText.Replace(
-    "=== CIERRES V6.18.6 - FECHA V6.5 INTACTA + OPEN_CIERRES SIN REFOCUS + DIAGNOSTICO COMBOBOX ===",
-    "=== CIERRES V6.19 - OPEN_CIERRES POR ESTADO + FECHA INTACTA + DIAGNOSTICO COMBOBOX ==="
+    "=== CIERRES V6.18.7 - FECHA V6.5 INTACTA + OPEN_CIERRES REPLAY GENERICO + DIAGNOSTICO COMBOBOX ===",
+    "=== CIERRES V6.19 - OPEN_CIERRES POR ESTADO + FECHA V6.5 INTACTA + DIAGNOSTICO COMBOBOX ==="
 )
 
 Set-Content -Path $runner -Value $runnerText -Encoding UTF8
-Write-Host "[OK] WorkflowRunner conectado a OpenClosuresExecutor."
+Write-Host "[OK] WorkflowRunner.cs actualizado."
 
-# 4) Compilar.
 if (Test-Path $solution) {
     Write-Host ""
-    Write-Host "=== DOTNET BUILD ==="
+    Write-Host "=== COMPILANDO ==="
     dotnet build $solution -c Release
+
     if ($LASTEXITCODE -ne 0) {
-        throw "dotnet build falló. Revisa los errores anteriores."
+        throw "La compilación falló."
     }
-} else {
-    Write-Warning "No encontré ParrillitaIA.Starter\ParrillitaIA.sln; cambios aplicados pero no se compiló."
+}
+else {
+    Write-Warning "No se encontró la solución en $solution"
 }
 
 Write-Host ""
-Write-Host "Cambios V6.19 aplicados correctamente."
-Write-Host "Prueba recomendada:"
-Write-Host '  .\ParrillitaIA.Trainer.exe test SAN_PEDRO CIERRES'
-Write-Host ""
-Write-Host "Envíame desde [OPEN] Inicio de apertura controlada hasta el resultado/error."
+Write-Host "V6.19 aplicada."
+Write-Host "Prueba el Trainer y copia el log desde [OPEN]."
