@@ -98,13 +98,14 @@ public sealed class WorkflowRunner
                 WorkflowStore.Load(
                     openClosuresFile);
 
-            // V6.19:
-            // OPEN_CIERRES se ejecuta por estado de UI.
-            // El segundo clic solo se realiza si el primer clic produjo
-            // un cambio real en la ventana/control bajo la opción.
-            await OpenClosuresExecutor.RunAsync(
-                openClosuresWorkflow,
-                cancellationToken);
+            // V6.18.7:
+            // Reproducir OPEN_CIERRES con EXACTAMENTE el mismo motor genérico
+            // usado para cualquier entrenamiento normal. Sin implementación
+            // especial de clics, foco, delays o resolución de ventana.
+            await new WorkflowRunner()
+                .RunAsync(
+                    openClosuresWorkflow,
+                    cancellationToken);
 
             Console.WriteLine(
                 "[CIERRES] OPEN_CIERRES finalizado.");
