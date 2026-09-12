@@ -10,7 +10,7 @@ public sealed class WorkflowRunner
     private const int FirstRowOffsetY = 20;
     private const int RowHeight = 15;
     private const int InsideListOffsetX = -40;
-    private const int VisibleRows = 10;
+    private const int VisibleRows = 7;
 
     public async Task RunAsync(
         WorkflowModel workflow,
@@ -42,7 +42,7 @@ public sealed class WorkflowRunner
     {
         Console.WriteLine();
         Console.WriteLine(
-            "=== CIERRES V6.18.26 - OPEN + FECHA OK + USUARIO POR FILA DIRECTA ===");
+            "=== CIERRES V6.18.50A - CONTEO TURNO SIN CLIC EN FILAS ===");
 
         var steps =
             workflow.Steps
@@ -61,6 +61,20 @@ public sealed class WorkflowRunner
             steps.FirstOrDefault(x => x.Order == 6)
             ?? throw new InvalidOperationException(
                 "No existe paso 6 de Usuario.");
+
+        // V6.18.30:
+        // Entrenamiento histórico:
+        //   paso 29 = abrir selector Reporte
+        //   paso 30 = seleccionar segunda opción (Láser)
+        var reportOpenStep =
+            steps.FirstOrDefault(x => x.Order == 29)
+            ?? throw new InvalidOperationException(
+                "No existe paso 29 de Reporte.");
+
+        var reportLaserStep =
+            steps.FirstOrDefault(x => x.Order == 30)
+            ?? throw new InvalidOperationException(
+                "No existe paso 30 de Reporte=Láser.");
 
         var executeSteps =
             steps.Where(
@@ -125,15 +139,17 @@ public sealed class WorkflowRunner
         // No ejecuta cierres todavía. Primero comprobamos si SoftRestaurant
         // expone el selector como ComboBox/Combo clásico y si podemos leer
         // sus elementos de forma determinista.
-        await RunUsersSequentialDiagnosticAsync(
+        await RunDuranTurnDropdownVisualDiagnosticAsync(
             userAnchor,
+            reportOpenStep,
+            reportLaserStep,
             cancellationToken);
 
         Console.WriteLine();
         Console.WriteLine(
             "[V6.18] Diagnóstico terminado. NO se ejecutaron cierres.");
         Console.WriteLine(
-            "[V6.18] Revisa el diagnóstico [USUARIOS][02] en consola.");
+            "[V6.18] Revisa [TURNO][ROW] y [TURNO][RESULT]. No se hacen clics en filas.");
 
         // Diagnóstico activo por defecto. Al ser una decisión de runtime,
         // el compilador no marca el código productivo posterior como inaccesible.
@@ -1954,97 +1970,2103 @@ public sealed class WorkflowRunner
             "[USUARIOS] Diagnóstico terminado. No se ejecutaron cierres.");
     }
 
-    private static async Task RunUsersSequentialDiagnosticAsync(
+    private static async Task RunDuranTurnDropdownVisualDiagnosticAsync(
         WorkflowStep userAnchor,
+        WorkflowStep reportOpenStep,
+        WorkflowStep reportLaserStep,
         CancellationToken cancellationToken)
     {
-        var selection =
+        Console.WriteLine();
+        Console.WriteLine(
+            "=== DURAN TURN DROPDOWN COUNT-ONLY V6.18.50A ===");
+
+        // ------------------------------------------------------------
+        // 1. Enumerar usuarios y seleccionar DURAN por nombre accesible.
+        // ------------------------------------------------------------
+        var userSelection =
             await GetUserAnchorAsync(
                 userAnchor,
                 cancellationToken);
 
-        var x =
-            selection.AnchorX;
+        var userX =
+            userSelection.AnchorX;
 
-        var y =
-            selection.AnchorY;
+        var userY =
+            userSelection.AnchorY;
+
+        await OpenUserDropdownAsync(
+            userX,
+            userY,
+            cancellationToken);
+
+        await MoveAccessibleUserListToTopAsync(
+            userX,
+            userY,
+            cancellationToken);
+
+        var orderedUsers =
+            await EnumerateAllAccessibleUsersAsync(
+                userX,
+                userY,
+                cancellationToken);
+
+        SendKey(
+            0x1B,
+            false,
+            false,
+            false);
+
+        await Task.Delay(
+            350,
+            cancellationToken);
+
+        const string targetUser =
+            "DURAN";
+
+        var selected =
+            await SelectAccessibleUserByNameAsync(
+                userX,
+                userY,
+                targetUser,
+                orderedUsers,
+                cancellationToken);
+
+        if (!selected)
+        {
+            throw new InvalidOperationException(
+                "No se pudo seleccionar DURAN.");
+        }
+
+        Console.WriteLine(
+            "[TURNO][PREP] Usuario DURAN seleccionado.");
+
+        // Reporte: Miniprinter -> Láser una sola vez.
+        await SelectInitialReportMiniprinterThenLaserAsync(
+            reportOpenStep,
+            reportLaserStep,
+            cancellationToken);
+
+        await Task.Delay(
+            800,
+            cancellationToken);
+
+        // ------------------------------------------------------------
+        // 2. Encontrar controles reales.
+        // ------------------------------------------------------------
+        var turn =
+            FindAccessibleControlByName(
+                "cboturno",
+                305,
+                245,
+                719,
+                518);
+
+        var turnInfo =
+            FindAccessibleControlByName(
+                "txtprecorte",
+                305,
+                245,
+                719,
+                518);
+
+        if (turn is null ||
+            turnInfo is null)
+        {
+            throw new InvalidOperationException(
+                "No se encontró cboturno o txtprecorte.");
+        }
+
+        Console.WriteLine(
+            $"[TURNO][FOUND] cboturno=({turn.Left},{turn.Top},{turn.Width},{turn.Height}); " +
+            $"txtprecorte=({turnInfo.Left},{turnInfo.Top},{turnInfo.Width},{turnInfo.Height})");
+
+        var hasTurn =
+            HasVisibleTurnData(
+                turnInfo.Left,
+                turnInfo.Top,
+                turnInfo.Width,
+                turnInfo.Height,
+                out var darkPixels,
+                out var sampledPixels);
+
+        Console.WriteLine(
+            $"[TURNO][HAS-DATA] Ink={darkPixels}/{sampledPixels}; TieneTurno={hasTurn}");
+
+        if (!hasTurn)
+        {
+            Console.WriteLine(
+                "[TURNO][STOP] DURAN aparece sin turnos. No se abre dropdown.");
+
+            return;
+        }
+
+        // ------------------------------------------------------------
+        // 3. Abrir dropdown REAL de turno.
+        // ------------------------------------------------------------
+        var arrowX =
+            turn.Left +
+            turn.Width -
+            8;
+
+        var arrowY =
+            turn.Top +
+            turn.Height / 2;
+
+        NativeMethods.SetCursorPos(
+            arrowX,
+            arrowY);
+
+        Console.WriteLine(
+            $"[TURNO][OPEN] Click flecha cboturno=({arrowX},{arrowY})");
+
+        Click();
+
+        await Task.Delay(
+            900,
+            cancellationToken);
+
+        // ------------------------------------------------------------
+        // 4. Detectar visualmente el popup del dropdown.
+        //
+        // El combo mide 44x22. Cuando abre, buscamos justo debajo y
+        // medimos franjas horizontales de 15 px. No intentamos OCR:
+        // solo detectamos si una fila tiene tinta/texto visible.
+        // ------------------------------------------------------------
+        var scanLeft =
+            turn.Left;
+
+        var scanTop =
+            turn.Top +
+            turn.Height;
+
+        var scanRight =
+            turnInfo.Left +
+            turnInfo.Width;
+
+        var scanWidth =
+            scanRight -
+            scanLeft;
+
+        const int rowHeight =
+            15;
+
+        const int maxRows =
+            8;
+
+        Console.WriteLine(
+            $"[TURNO][VISUAL-SCAN] Area inicial=({scanLeft},{scanTop},{scanWidth},{rowHeight * maxRows})");
+
+        // Fondo de referencia tomado justo debajo del bloque de turno,
+        // en una zona del formulario que normalmente es naranja/clara.
+        var background =
+            SampleAverageColorSparse(
+                scanLeft,
+                scanTop + rowHeight * maxRows + 8,
+                scanWidth,
+                10);
+
+        Console.WriteLine(
+            $"[TURNO][BACKGROUND] R={background.R}; G={background.G}; B={background.B}");
+
+        var detectedRows =
+            0;
+
+        var rowFlags =
+            new List<bool>();
+
+        for (var rowIndex = 0;
+             rowIndex < maxRows;
+             rowIndex++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var rowTop =
+                scanTop +
+                rowIndex * rowHeight;
+
+            Console.WriteLine(
+                $"[TURNO][ROW {rowIndex + 1:00}] Analizando Y={rowTop}...");
+
+            var stats =
+                AnalyzeTurnDropdownRow(
+                    scanLeft,
+                    rowTop,
+                    scanWidth,
+                    rowHeight,
+                    background);
+
+            var isOption =
+                stats.BlueLikeRatio >= 0.10 ||
+                stats.ColorDifferenceRatio >= 0.18;
+
+            rowFlags.Add(
+                isOption);
+
+            Console.WriteLine(
+                $"[TURNO][ROW {rowIndex + 1:00}] " +
+                $"BlueLike={stats.BlueLikePixels}/{stats.SampledPixels} " +
+                $"({stats.BlueLikeRatio:P1}); " +
+                $"Diff={stats.DifferentPixels}/{stats.SampledPixels} " +
+                $"({stats.ColorDifferenceRatio:P1}); " +
+                $"EsOpcion={isOption}");
+
+            if (isOption)
+            {
+                detectedRows++;
+            }
+            else if (detectedRows > 0)
+            {
+                // En este combo las opciones son contiguas.
+                break;
+            }
+        }
 
         Console.WriteLine();
         Console.WriteLine(
-            "=== SELECCION DIRECTA DE FILAS USUARIO V6.18.26 ===");
-
-        Console.WriteLine(
-            $"[USUARIOS] Anchor=({x},{y})");
-
-        Console.WriteLine(
-            $"[USUARIOS] Geometría lista: X={x + InsideListOffsetX}; " +
-            $"FirstRowOffsetY={FirstRowOffsetY}; RowHeight={RowHeight}");
+            $"[TURNO][RESULT] DURAN opciones visuales detectadas={detectedRows}");
 
         // ------------------------------------------------------------
-        // PRUEBA 1: seleccionar FILA 2 directamente.
-        // En el video actual corresponde visualmente a BOSPINA.
+        // 5. IMPORTANTE:
+        //    NO hacemos clic en ninguna fila del dropdown.
+        //
+        //    En V6.18.50 una coordenada fuera del popup cayó sobre
+        //    "Convertir moneda extranjera" y cambió su checkbox.
+        //
+        //    Este diagnóstico es SOLO CONTEO VISUAL.
         // ------------------------------------------------------------
-        await SelectUserRowDirectAsync(
-            x,
-            y,
-            rowIndex: 1,
-            displayOrdinal: 2,
-            cancellationToken);
+        Console.WriteLine(
+            "[TURNO][SAFE] No se hará clic en ninguna opción de Turno.");
 
         Console.WriteLine(
-            "[USUARIOS] Pausa para verificar visualmente la FILA 2...");
+            "[TURNO][SAFE] Cerrando dropdown únicamente con ESC.");
+
+        SendKey(
+            0x1B,
+            false,
+            false,
+            false);
 
         await Task.Delay(
-            2500,
-            cancellationToken);
-
-        // ------------------------------------------------------------
-        // PRUEBA 2: seleccionar FILA 3 directamente.
-        // En el video actual corresponde visualmente a SANCHEZ.
-        // ------------------------------------------------------------
-        await SelectUserRowDirectAsync(
-            x,
-            y,
-            rowIndex: 2,
-            displayOrdinal: 3,
-            cancellationToken);
-
-        Console.WriteLine(
-            "[USUARIOS] Pausa para verificar visualmente la FILA 3...");
-
-        await Task.Delay(
-            2500,
+            300,
             cancellationToken);
 
         Console.WriteLine();
         Console.WriteLine(
-            "[USUARIOS] V6.18.26 terminado.");
+            "[V6.18.50A] Diagnóstico visual DURAN terminado.");
 
         Console.WriteLine(
-            "[USUARIOS] NO se usaron hashes para decidir éxito.");
-
-        Console.WriteLine(
-            "[USUARIOS] NO se tocó Reporte, Turno, Destino ni Exportación.");
+            "[V6.18.50A] NO se ejecutó ni exportó ningún reporte.");
     }
 
-    private static async Task SelectUserRowDirectAsync(
+    private readonly record struct RgbSample(
+        int R,
+        int G,
+        int B);
+
+    private readonly record struct TurnRowVisualStats(
+        int SampledPixels,
+        int BlueLikePixels,
+        int DifferentPixels)
+    {
+        public double BlueLikeRatio =>
+            SampledPixels == 0
+                ? 0
+                : (double)BlueLikePixels / SampledPixels;
+
+        public double ColorDifferenceRatio =>
+            SampledPixels == 0
+                ? 0
+                : (double)DifferentPixels / SampledPixels;
+    }
+
+    private static RgbSample SampleAverageColorSparse(
+        int left,
+        int top,
+        int width,
+        int height)
+    {
+        var hdc =
+            NativeMethods.GetDC(
+                IntPtr.Zero);
+
+        if (hdc == IntPtr.Zero)
+            return new RgbSample(0, 0, 0);
+
+        try
+        {
+            long sumR = 0;
+            long sumG = 0;
+            long sumB = 0;
+            var count = 0;
+
+            const int stepX = 4;
+            const int stepY = 3;
+
+            for (var y = top;
+                 y < top + height;
+                 y += stepY)
+            {
+                for (var x = left;
+                     x < left + width;
+                     x += stepX)
+                {
+                    var pixel =
+                        NativeMethods.GetPixel(
+                            hdc,
+                            x,
+                            y);
+
+                    sumR +=
+                        (int)(pixel & 0xFF);
+
+                    sumG +=
+                        (int)((pixel >> 8) & 0xFF);
+
+                    sumB +=
+                        (int)((pixel >> 16) & 0xFF);
+
+                    count++;
+                }
+            }
+
+            if (count == 0)
+                return new RgbSample(0, 0, 0);
+
+            return new RgbSample(
+                (int)(sumR / count),
+                (int)(sumG / count),
+                (int)(sumB / count));
+        }
+        finally
+        {
+            NativeMethods.ReleaseDC(
+                IntPtr.Zero,
+                hdc);
+        }
+    }
+
+    private static TurnRowVisualStats AnalyzeTurnDropdownRow(
+        int left,
+        int top,
+        int width,
+        int height,
+        RgbSample background)
+    {
+        var hdc =
+            NativeMethods.GetDC(
+                IntPtr.Zero);
+
+        if (hdc == IntPtr.Zero)
+            return new TurnRowVisualStats(0, 0, 0);
+
+        try
+        {
+            var sampled =
+                0;
+
+            var blueLike =
+                0;
+
+            var different =
+                0;
+
+            const int stepX =
+                3;
+
+            const int stepY =
+                2;
+
+            for (var y = top + 1;
+                 y < top + height - 1;
+                 y += stepY)
+            {
+                for (var x = left + 1;
+                     x < left + width - 1;
+                     x += stepX)
+                {
+                    var pixel =
+                        NativeMethods.GetPixel(
+                            hdc,
+                            x,
+                            y);
+
+                    var r =
+                        (int)(pixel & 0xFF);
+
+                    var g =
+                        (int)((pixel >> 8) & 0xFF);
+
+                    var b =
+                        (int)((pixel >> 16) & 0xFF);
+
+                    sampled++;
+
+                    // Selección/lista azul típica de VB6/Windows.
+                    if (b > r + 25 &&
+                        b > g + 10 &&
+                        b >= 110)
+                    {
+                        blueLike++;
+                    }
+
+                    var delta =
+                        Math.Abs(r - background.R) +
+                        Math.Abs(g - background.G) +
+                        Math.Abs(b - background.B);
+
+                    if (delta >= 85)
+                    {
+                        different++;
+                    }
+                }
+            }
+
+            return new TurnRowVisualStats(
+                sampled,
+                blueLike,
+                different);
+        }
+        finally
+        {
+            NativeMethods.ReleaseDC(
+                IntPtr.Zero,
+                hdc);
+        }
+    }
+
+    private static int CountDarkPixelsInRegion(
+        int left,
+        int top,
+        int width,
+        int height,
+        out int sampledPixels)
+    {
+        sampledPixels =
+            0;
+
+        var darkPixels =
+            0;
+
+        var hdc =
+            NativeMethods.GetDC(
+                IntPtr.Zero);
+
+        if (hdc == IntPtr.Zero)
+            return 0;
+
+        try
+        {
+            for (var y = top;
+                 y < top + height;
+                 y++)
+            {
+                for (var x = left;
+                     x < left + width;
+                     x++)
+                {
+                    var pixel =
+                        NativeMethods.GetPixel(
+                            hdc,
+                            x,
+                            y);
+
+                    var r =
+                        (int)(pixel & 0xFF);
+
+                    var g =
+                        (int)((pixel >> 8) & 0xFF);
+
+                    var b =
+                        (int)((pixel >> 16) & 0xFF);
+
+                    sampledPixels++;
+
+                    if (r < 135 &&
+                        g < 135 &&
+                        b < 135)
+                    {
+                        darkPixels++;
+                    }
+                }
+            }
+
+            return darkPixels;
+        }
+        finally
+        {
+            NativeMethods.ReleaseDC(
+                IntPtr.Zero,
+                hdc);
+        }
+    }
+
+    private static bool HasVisibleTurnData(
+        int left,
+        int top,
+        int width,
+        int height,
+        out int darkPixels,
+        out int sampledPixels)
+    {
+        darkPixels =
+            0;
+
+        sampledPixels =
+            0;
+
+        var hdc =
+            NativeMethods.GetDC(
+                IntPtr.Zero);
+
+        if (hdc == IntPtr.Zero)
+            return false;
+
+        try
+        {
+            // Ignorar borde del TextBox para no confundirlo con contenido.
+            var x0 =
+                left + 4;
+
+            var y0 =
+                top + 4;
+
+            var x1 =
+                left + width - 5;
+
+            var y1 =
+                top + height - 5;
+
+            for (var y = y0;
+                 y <= y1;
+                 y++)
+            {
+                for (var x = x0;
+                     x <= x1;
+                     x++)
+                {
+                    var pixel =
+                        NativeMethods.GetPixel(
+                            hdc,
+                            x,
+                            y);
+
+                    var r =
+                        (int)(pixel & 0xFF);
+
+                    var g =
+                        (int)((pixel >> 8) & 0xFF);
+
+                    var b =
+                        (int)((pixel >> 16) & 0xFF);
+
+                    sampledPixels++;
+
+                    // Texto de fecha/hora es oscuro sobre fondo claro.
+                    // Umbral deliberadamente conservador para ignorar
+                    // sombras suaves del tema.
+                    if (r < 135 &&
+                        g < 135 &&
+                        b < 135)
+                    {
+                        darkPixels++;
+                    }
+                }
+            }
+
+            // Una fecha/hora completa produce muchos píxeles oscuros.
+            // Un campo vacío debería quedar prácticamente en cero.
+            return darkPixels >= 8;
+        }
+        finally
+        {
+            NativeMethods.ReleaseDC(
+                IntPtr.Zero,
+                hdc);
+        }
+    }
+
+
+    private static ulong CaptureTurnSelectionFingerprint(
+        int turnLeft,
+        int turnTop)
+    {
+        var hdc =
+            NativeMethods.GetDC(
+                IntPtr.Zero);
+
+        if (hdc == IntPtr.Zero)
+            return 0;
+
+        try
+        {
+            ulong hash =
+                1469598103934665603UL;
+
+            // Región que cubre cboturno + txtprecorte.
+            var left =
+                turnLeft;
+
+            var top =
+                turnTop;
+
+            const int width =
+                190;
+
+            const int height =
+                22;
+
+            const int cols =
+                48;
+
+            const int rows =
+                10;
+
+            for (var row = 0;
+                 row < rows;
+                 row++)
+            {
+                for (var col = 0;
+                     col < cols;
+                     col++)
+                {
+                    var x =
+                        left +
+                        col *
+                        (width - 1) /
+                        (cols - 1);
+
+                    var y =
+                        top +
+                        row *
+                        (height - 1) /
+                        (rows - 1);
+
+                    var pixel =
+                        NativeMethods.GetPixel(
+                            hdc,
+                            x,
+                            y);
+
+                    hash ^=
+                        pixel;
+
+                    hash *=
+                        1099511628211UL;
+                }
+            }
+
+            return hash;
+        }
+        finally
+        {
+            NativeMethods.ReleaseDC(
+                IntPtr.Zero,
+                hdc);
+        }
+    }
+
+    private static TurnAccessibleProbe? FindAccessibleControlByName(
+        string targetName,
+        int left,
+        int top,
+        int right,
+        int bottom)
+    {
+        var seen =
+            new HashSet<string>(
+                StringComparer.Ordinal);
+
+        for (var y = top;
+             y <= bottom;
+             y += 5)
+        {
+            for (var x = left;
+                 x <= right;
+                 x += 5)
+            {
+                var probe =
+                    TryReadAccessibleProbeAtPoint(
+                        x,
+                        y);
+
+                if (probe is null)
+                    continue;
+
+                var key =
+                    $"{probe.Name}|{probe.Value}|{probe.Role}|" +
+                    $"{probe.Left},{probe.Top},{probe.Width},{probe.Height}";
+
+                if (!seen.Add(
+                        key))
+                {
+                    continue;
+                }
+
+                if (string.Equals(
+                        probe.Name.Trim(),
+                        targetName,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return probe;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private sealed class TurnAccessibleProbe
+    {
+        public string Name { get; init; } = "";
+        public string Value { get; init; } = "";
+        public string Role { get; init; } = "";
+        public string State { get; init; } = "";
+        public int Left { get; init; }
+        public int Top { get; init; }
+        public int Width { get; init; }
+        public int Height { get; init; }
+    }
+
+    private static TurnAccessibleProbe? TryReadAccessibleProbeAtPoint(
+        int x,
+        int y)
+    {
+        var point =
+            new NativeMethods.POINT
+            {
+                X = x,
+                Y = y
+            };
+
+        object accessible;
+        object childId;
+
+        var hr =
+            AccessibleObjectFromPoint(
+                point,
+                out accessible,
+                out childId);
+
+        if (hr < 0 ||
+            accessible is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            dynamic acc =
+                accessible;
+
+            var name =
+                TryGetAccessibleName(
+                    acc,
+                    childId)
+                .Trim();
+
+            var value =
+                TryGetAccessibleValue(
+                    acc,
+                    childId)
+                .Trim();
+
+            var role =
+                TryGetAccessibleRole(
+                    acc,
+                    childId);
+
+            var state =
+                TryGetAccessibleState(
+                    acc,
+                    childId);
+
+            int left;
+            int top;
+            int width;
+            int height;
+
+            acc.accLocation(
+                out left,
+                out top,
+                out width,
+                out height,
+                childId);
+
+            if (width <= 0 ||
+                height <= 0)
+            {
+                return null;
+            }
+
+            return new TurnAccessibleProbe
+            {
+                Name = name,
+                Value = value,
+                Role = role,
+                State = state,
+                Left = left,
+                Top = top,
+                Width = width,
+                Height = height
+            };
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static async Task MoveAccessibleUserListToTopAsync(
+        int anchorX,
+        int anchorY,
+        CancellationToken cancellationToken)
+    {
+        string previousFirst =
+            "";
+
+        for (var i = 0;
+             i < MaxUsers;
+             i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var visible =
+                ReadVisibleAccessibleUsers(
+                    anchorX,
+                    anchorY);
+
+            if (visible.Count == 0)
+                return;
+
+            var first =
+                visible[0].Name;
+
+            if (i > 0 &&
+                string.Equals(
+                    first,
+                    previousFirst,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            previousFirst =
+                first;
+
+            ClickAccessibleScrollLineUp(
+                anchorX,
+                anchorY);
+
+            await Task.Delay(
+                180,
+                cancellationToken);
+        }
+    }
+
+    private static async Task<List<string>> EnumerateAllAccessibleUsersAsync(
+        int anchorX,
+        int anchorY,
+        CancellationToken cancellationToken)
+    {
+        var orderedUsers =
+            new List<string>();
+
+        var seen =
+            new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+
+        var lastViewportKey =
+            "";
+
+        for (var guard = 0;
+             guard < MaxUsers * 2;
+             guard++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var visible =
+                ReadVisibleAccessibleUsers(
+                    anchorX,
+                    anchorY);
+
+            if (visible.Count == 0)
+                break;
+
+            var viewportKey =
+                string.Join(
+                    "|",
+                    visible.Select(x => x.Name));
+
+            foreach (var item in visible)
+            {
+                if (seen.Add(item.Name))
+                {
+                    orderedUsers.Add(
+                        item.Name);
+                }
+            }
+
+            if (string.Equals(
+                    viewportKey,
+                    lastViewportKey,
+                    StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            lastViewportKey =
+                viewportKey;
+
+            if (!ClickAccessibleScrollLineDown(
+                    anchorX,
+                    anchorY))
+            {
+                break;
+            }
+
+            await Task.Delay(
+                220,
+                cancellationToken);
+        }
+
+        return orderedUsers;
+    }
+
+    private static async Task<bool> SelectAccessibleUserByNameAsync(
+        int anchorX,
+        int anchorY,
+        string targetName,
+        IReadOnlyList<string> orderedUsers,
+        CancellationToken cancellationToken)
+    {
+        await OpenUserDropdownAsync(
+            anchorX,
+            anchorY,
+            cancellationToken);
+
+        // El dropdown puede reabrirse en cualquier posición.
+        // Primero revisamos el viewport actual.
+        for (var guard = 0;
+             guard < MaxUsers * 2;
+             guard++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var visible =
+                ReadVisibleAccessibleUsers(
+                    anchorX,
+                    anchorY);
+
+            var target =
+                visible.FirstOrDefault(
+                    x => string.Equals(
+                        x.Name,
+                        targetName,
+                        StringComparison.OrdinalIgnoreCase));
+
+            if (target is not null)
+            {
+                var clickX =
+                    target.Left +
+                    target.Width / 2;
+
+                var clickY =
+                    target.Top +
+                    target.Height / 2;
+
+                Console.WriteLine(
+                    $"[A11Y][TARGET] \"{target.Name}\" " +
+                    $"Bounds=({target.Left},{target.Top},{target.Width},{target.Height}) " +
+                    $"Click=({clickX},{clickY})");
+
+                NativeMethods.SetCursorPos(
+                    clickX,
+                    clickY);
+
+                await Task.Delay(
+                    350,
+                    cancellationToken);
+
+                Click();
+
+                await Task.Delay(
+                    1000,
+                    cancellationToken);
+
+                return true;
+            }
+
+            if (visible.Count == 0)
+            {
+                SendKey(
+                    0x1B,
+                    false,
+                    false,
+                    false);
+
+                return false;
+            }
+
+            // Decidir dirección usando el orden completo conocido.
+            var targetIndex =
+                IndexOfUserName(
+                    orderedUsers,
+                    targetName);
+
+            var firstIndex =
+                IndexOfUserName(
+                    orderedUsers,
+                    visible[0].Name);
+
+            var lastIndex =
+                IndexOfUserName(
+                    orderedUsers,
+                    visible[^1].Name);
+
+            bool moved;
+
+            if (targetIndex >= 0 &&
+                firstIndex >= 0 &&
+                targetIndex < firstIndex)
+            {
+                Console.WriteLine(
+                    $"[A11Y][SEARCH] \"{targetName}\" está arriba del viewport.");
+
+                ClickAccessibleScrollLineUp(
+                    anchorX,
+                    anchorY);
+
+                moved =
+                    true;
+            }
+            else
+            {
+                Console.WriteLine(
+                    $"[A11Y][SEARCH] \"{targetName}\" está debajo del viewport.");
+
+                moved =
+                    ClickAccessibleScrollLineDown(
+                        anchorX,
+                        anchorY);
+            }
+
+            if (!moved)
+            {
+                SendKey(
+                    0x1B,
+                    false,
+                    false,
+                    false);
+
+                return false;
+            }
+
+            await Task.Delay(
+                220,
+                cancellationToken);
+        }
+
+        SendKey(
+            0x1B,
+            false,
+            false,
+            false);
+
+        return false;
+    }
+
+    private static int IndexOfUserName(
+        IReadOnlyList<string> users,
+        string name)
+    {
+        for (var i = 0;
+             i < users.Count;
+             i++)
+        {
+            if (string.Equals(
+                    users[i],
+                    name,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private sealed class AccessibleUserItem
+    {
+        public string Name { get; init; } = "";
+        public int Left { get; init; }
+        public int Top { get; init; }
+        public int Width { get; init; }
+        public int Height { get; init; }
+    }
+
+    private static List<AccessibleUserItem> ReadVisibleAccessibleUsers(
+        int anchorX,
+        int anchorY)
+    {
+        var items =
+            new List<AccessibleUserItem>();
+
+        // La prueba V6.18.41 confirmó filas de 15 px y 7 visibles.
+        // Sondeamos el centro vertical aproximado de cada fila.
+        var rowX =
+            anchorX - 40;
+
+        for (var rowIndex = 0;
+             rowIndex < 7;
+             rowIndex++)
+        {
+            var rowY =
+                anchorY +
+                FirstRowOffsetY +
+                rowIndex *
+                RowHeight;
+
+            var item =
+                TryReadAccessibleUserAtPoint(
+                    rowX,
+                    rowY);
+
+            if (item is not null &&
+                !string.IsNullOrWhiteSpace(
+                    item.Name))
+            {
+                items.Add(
+                    item);
+            }
+        }
+
+        return items;
+    }
+
+    private static AccessibleUserItem? TryReadAccessibleUserAtPoint(
+        int x,
+        int y)
+    {
+        var point =
+            new NativeMethods.POINT
+            {
+                X = x,
+                Y = y
+            };
+
+        object accessible;
+        object childId;
+
+        var hr =
+            AccessibleObjectFromPoint(
+                point,
+                out accessible,
+                out childId);
+
+        if (hr < 0 ||
+            accessible is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            dynamic acc =
+                accessible;
+
+            var role =
+                TryGetAccessibleRole(
+                    acc,
+                    childId);
+
+            // ROLE_SYSTEM_LISTITEM = 34
+            if (!role.StartsWith(
+                    "34",
+                    StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            var name =
+                TryGetAccessibleName(
+                    acc,
+                    childId)
+                .Trim();
+
+            if (string.IsNullOrWhiteSpace(
+                    name))
+            {
+                return null;
+            }
+
+            int left;
+            int top;
+            int width;
+            int height;
+
+            acc.accLocation(
+                out left,
+                out top,
+                out width,
+                out height,
+                childId);
+
+            return new AccessibleUserItem
+            {
+                Name = name,
+                Left = left,
+                Top = top,
+                Width = width,
+                Height = height
+            };
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static void ClickAccessibleScrollLineUp(
+        int anchorX,
+        int anchorY)
+    {
+        // V6.18.41 confirmó:
+        // Línea arriba Bounds=(533,366,17,17)
+        var x =
+            anchorX + 81;
+
+        var y =
+            anchorY + 16;
+
+        NativeMethods.SetCursorPos(
+            x,
+            y);
+
+        Click();
+    }
+
+    private static bool ClickAccessibleScrollLineDown(
+        int anchorX,
+        int anchorY)
+    {
+        // Popup real:
+        // filas desde Y≈366 hasta Y≈471.
+        // La flecha inferior ocupa el extremo inferior de la scrollbar.
+        // Usamos el centro, no el borde X=533 que en diagnósticos podía
+        // caer exactamente en el límite del list item.
+        var x =
+            anchorX + 81;
+
+        var y =
+            anchorY + 105;
+
+        var point =
+            new NativeMethods.POINT
+            {
+                X = x,
+                Y = y
+            };
+
+        object accessible;
+        object childId;
+
+        var hr =
+            AccessibleObjectFromPoint(
+                point,
+                out accessible,
+                out childId);
+
+        if (hr < 0 ||
+            accessible is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            dynamic acc =
+                accessible;
+
+            var name =
+                TryGetAccessibleName(
+                    acc,
+                    childId)
+                .Trim();
+
+            var role =
+                TryGetAccessibleRole(
+                    acc,
+                    childId);
+
+            Console.WriteLine(
+                $"[A11Y][SCROLL-DOWN] Name=\"{name}\" Role={role} Point=({x},{y})");
+
+            if (!name.Contains(
+                    "abajo",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            NativeMethods.SetCursorPos(
+                x,
+                y);
+
+            Click();
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    [DllImport(
+        "oleacc.dll",
+        PreserveSig = true)]
+    private static extern int AccessibleObjectFromPoint(
+        NativeMethods.POINT ptScreen,
+        [MarshalAs(UnmanagedType.Interface)] out object accessible,
+        [MarshalAs(UnmanagedType.Struct)] out object childId);
+
+    private static void DumpAccessibleAtPoint(
+        string label,
+        int x,
+        int y)
+    {
+        var point =
+            new NativeMethods.POINT
+            {
+                X = x,
+                Y = y
+            };
+
+        var hwnd =
+            NativeMethods.WindowFromPoint(
+                point);
+
+        Console.WriteLine();
+        Console.WriteLine(
+            $"[A11Y][{label}] Point=({x},{y}) " +
+            $"HWND=0x{hwnd.ToInt64():X} " +
+            $"Class=\"{GetClassName(hwnd)}\" " +
+            $"Text=\"{GetWindowText(hwnd).Trim()}\"");
+
+        object accessible;
+        object childId;
+
+        var hr =
+            AccessibleObjectFromPoint(
+                point,
+                out accessible,
+                out childId);
+
+        Console.WriteLine(
+            $"[A11Y][{label}] AccessibleObjectFromPoint HR=0x{hr:X8}; " +
+            $"Child={FormatComValue(childId)}; " +
+            $"ComObject={Marshal.IsComObject(accessible)}");
+
+        if (hr < 0 ||
+            accessible is null)
+        {
+            Console.WriteLine(
+                $"[A11Y][{label}] No se obtuvo objeto accesible.");
+
+            return;
+        }
+
+        dynamic acc =
+            accessible;
+
+        var name =
+            TryGetAccessibleName(
+                acc,
+                childId);
+
+        var value =
+            TryGetAccessibleValue(
+                acc,
+                childId);
+
+        var role =
+            TryGetAccessibleRole(
+                acc,
+                childId);
+
+        var state =
+            TryGetAccessibleState(
+                acc,
+                childId);
+
+        var description =
+            TryGetAccessibleDescription(
+                acc,
+                childId);
+
+        var defaultAction =
+            TryGetAccessibleDefaultAction(
+                acc,
+                childId);
+
+        var childCount =
+            TryGetAccessibleChildCount(
+                acc);
+
+        var bounds =
+            TryGetAccessibleBounds(
+                acc,
+                childId);
+
+        Console.WriteLine(
+            $"[A11Y][{label}] " +
+            $"Name=\"{name}\"; " +
+            $"Value=\"{value}\"; " +
+            $"Role={role}; " +
+            $"State={state}; " +
+            $"Children={childCount}");
+
+        Console.WriteLine(
+            $"[A11Y][{label}] " +
+            $"Description=\"{description}\"; " +
+            $"DefaultAction=\"{defaultAction}\"; " +
+            $"Bounds={bounds}");
+    }
+
+    private static string TryGetAccessibleName(
+        dynamic acc,
+        object childId)
+    {
+        try
+        {
+            return Convert.ToString(
+                       acc.get_accName(
+                           childId)) ??
+                   "";
+        }
+        catch
+        {
+            try
+            {
+                return Convert.ToString(
+                           acc.accName) ??
+                       "";
+            }
+            catch
+            {
+                return "<NO-EXPUESTO>";
+            }
+        }
+    }
+
+    private static string TryGetAccessibleValue(
+        dynamic acc,
+        object childId)
+    {
+        try
+        {
+            return Convert.ToString(
+                       acc.get_accValue(
+                           childId)) ??
+                   "";
+        }
+        catch
+        {
+            try
+            {
+                return Convert.ToString(
+                           acc.accValue) ??
+                       "";
+            }
+            catch
+            {
+                return "<NO-EXPUESTO>";
+            }
+        }
+    }
+
+    private static string TryGetAccessibleRole(
+        dynamic acc,
+        object childId)
+    {
+        try
+        {
+            return FormatComValue(
+                acc.get_accRole(
+                    childId));
+        }
+        catch
+        {
+            try
+            {
+                return FormatComValue(
+                    acc.accRole);
+            }
+            catch
+            {
+                return "<NO-EXPUESTO>";
+            }
+        }
+    }
+
+    private static string TryGetAccessibleState(
+        dynamic acc,
+        object childId)
+    {
+        try
+        {
+            return FormatComValue(
+                acc.get_accState(
+                    childId));
+        }
+        catch
+        {
+            try
+            {
+                return FormatComValue(
+                    acc.accState);
+            }
+            catch
+            {
+                return "<NO-EXPUESTO>";
+            }
+        }
+    }
+
+    private static string TryGetAccessibleDescription(
+        dynamic acc,
+        object childId)
+    {
+        try
+        {
+            return Convert.ToString(
+                       acc.get_accDescription(
+                           childId)) ??
+                   "";
+        }
+        catch
+        {
+            return "<NO-EXPUESTO>";
+        }
+    }
+
+    private static string TryGetAccessibleDefaultAction(
+        dynamic acc,
+        object childId)
+    {
+        try
+        {
+            return Convert.ToString(
+                       acc.get_accDefaultAction(
+                           childId)) ??
+                   "";
+        }
+        catch
+        {
+            return "<NO-EXPUESTO>";
+        }
+    }
+
+    private static int TryGetAccessibleChildCount(
+        dynamic acc)
+    {
+        try
+        {
+            return Convert.ToInt32(
+                acc.accChildCount);
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
+    private static string TryGetAccessibleBounds(
+        dynamic acc,
+        object childId)
+    {
+        try
+        {
+            int left;
+            int top;
+            int width;
+            int height;
+
+            acc.accLocation(
+                out left,
+                out top,
+                out width,
+                out height,
+                childId);
+
+            return
+                $"({left},{top},{width},{height})";
+        }
+        catch
+        {
+            return "<NO-EXPUESTO>";
+        }
+    }
+
+    private static string FormatComValue(
+        object? value)
+    {
+        if (value is null)
+            return "<null>";
+
+        try
+        {
+            return
+                $"{value} ({value.GetType().Name})";
+        }
+        catch
+        {
+            return
+                Convert.ToString(value) ??
+                "<null>";
+        }
+    }
+
+    private static async Task<bool> ScrollUserListDownExactlyOneAsync(
+        int anchorX,
+        int anchorY,
+        CancellationToken cancellationToken)
+    {
+        var scrollX =
+            anchorX + 73;
+
+        var scrollDownY =
+            anchorY +
+            FirstRowOffsetY +
+            VisibleRows * RowHeight -
+            2;
+
+        // Sacar cursor de la lista antes de capturar.
+        NativeMethods.SetCursorPos(
+            anchorX + 115,
+            anchorY - 12);
+
+        await Task.Delay(
+            180,
+            cancellationToken);
+
+        var before =
+            CaptureUserListViewportFingerprint(
+                anchorX,
+                anchorY);
+
+        Console.WriteLine(
+            $"[USUARIOS][SCROLL] Click DOWN único en ({scrollX},{scrollDownY})");
+
+        NativeMethods.SetCursorPos(
+            scrollX,
+            scrollDownY);
+
+        Click();
+
+        await Task.Delay(
+            320,
+            cancellationToken);
+
+        NativeMethods.SetCursorPos(
+            anchorX + 115,
+            anchorY - 12);
+
+        await Task.Delay(
+            180,
+            cancellationToken);
+
+        var after =
+            CaptureUserListViewportFingerprint(
+                anchorX,
+                anchorY);
+
+        var changed =
+            before != 0 &&
+            after != 0 &&
+            before != after;
+
+        Console.WriteLine(
+            $"[USUARIOS][SCROLL] " +
+            $"Antes=0x{before:X16}; Después=0x{after:X16}; Cambio={changed}");
+
+        return changed;
+    }
+
+
+    private static ulong CaptureUserListViewportFingerprint(
+        int anchorX,
+        int anchorY)
+    {
+        var hdc =
+            NativeMethods.GetDC(
+                IntPtr.Zero);
+
+        if (hdc == IntPtr.Zero)
+            return 0;
+
+        try
+        {
+            ulong hash =
+                1469598103934665603UL;
+
+            // Solo el área interna del dropdown de Usuario.
+            // Excluye el campo principal y la scrollbar.
+            const int leftOffset =
+                -145;
+
+            const int topOffset =
+                18;
+
+            const int width =
+                195;
+
+            const int height =
+                102;
+
+            const int sampleColumns =
+                32;
+
+            const int sampleRows =
+                21;
+
+            for (var row = 0;
+                 row < sampleRows;
+                 row++)
+            {
+                for (var column = 0;
+                     column < sampleColumns;
+                     column++)
+                {
+                    var px =
+                        anchorX +
+                        leftOffset +
+                        column *
+                        (width - 1) /
+                        (sampleColumns - 1);
+
+                    var py =
+                        anchorY +
+                        topOffset +
+                        row *
+                        (height - 1) /
+                        (sampleRows - 1);
+
+                    var pixel =
+                        NativeMethods.GetPixel(
+                            hdc,
+                            px,
+                            py);
+
+                    hash ^=
+                        pixel;
+
+                    hash *=
+                        1099511628211UL;
+                }
+            }
+
+            return hash;
+        }
+        finally
+        {
+            NativeMethods.ReleaseDC(
+                IntPtr.Zero,
+                hdc);
+        }
+    }
+
+    private static async Task<ulong> CaptureStableUserFieldFingerprintAsync(
+        int anchorX,
+        int anchorY,
+        CancellationToken cancellationToken)
+    {
+        NativeMethods.SetCursorPos(
+            anchorX + 150,
+            anchorY - 25);
+
+        await Task.Delay(
+            350,
+            cancellationToken);
+
+        return CaptureUserFieldFingerprint(
+            anchorX,
+            anchorY);
+    }
+
+    private static async Task OpenUserDropdownAsync(
+        int anchorX,
+        int anchorY,
+        CancellationToken cancellationToken)
+    {
+        NativeMethods.SetCursorPos(
+            anchorX,
+            anchorY);
+
+        Click();
+
+        await Task.Delay(
+            800,
+            cancellationToken);
+    }
+
+    private static async Task ScrollUserListToTopOnceAsync(
+        int anchorX,
+        int anchorY,
+        CancellationToken cancellationToken)
+    {
+        var scrollX =
+            anchorX + 73;
+
+        var scrollUpY =
+            anchorY + 20;
+
+        for (var i = 0;
+             i < MaxUsers;
+             i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            NativeMethods.SetCursorPos(
+                scrollX,
+                scrollUpY);
+
+            Click();
+
+            await Task.Delay(
+                55,
+                cancellationToken);
+        }
+
+        NativeMethods.SetCursorPos(
+            anchorX - 100,
+            anchorY - 20);
+
+        await Task.Delay(
+            500,
+            cancellationToken);
+    }
+
+    private static async Task ClickVisibleUserRowAsync(
+        int anchorX,
+        int anchorY,
+        int rowIndex,
+        CancellationToken cancellationToken)
+    {
+        var rowX =
+            anchorX +
+            InsideListOffsetX;
+
+        var rowY =
+            anchorY +
+            FirstRowOffsetY +
+            rowIndex *
+            RowHeight;
+
+        Console.WriteLine(
+            $"[USUARIOS] Click filaVisible={rowIndex + 1}; punto=({rowX},{rowY})");
+
+        NativeMethods.SetCursorPos(
+            rowX,
+            rowY);
+
+        await Task.Delay(
+            400,
+            cancellationToken);
+
+        Click();
+
+        await Task.Delay(
+            1200,
+            cancellationToken);
+    }
+
+    private static async Task SelectInitialReportMiniprinterThenLaserAsync(
+        WorkflowStep reportOpenStep,
+        WorkflowStep reportLaserStep,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var window =
+            await WaitForWindowAsync(
+                reportOpenStep,
+                cancellationToken);
+
+        if (window == IntPtr.Zero)
+        {
+            throw new InvalidOperationException(
+                "REPORTE: no apareció la ventana principal.");
+        }
+
+        if (!NativeMethods.GetWindowRect(
+                window,
+                out var rect))
+        {
+            throw new InvalidOperationException(
+                "REPORTE: no se pudo leer la geometría de la ventana.");
+        }
+
+        var openX =
+            rect.Left +
+            (int)Math.Round(
+                rect.Width *
+                reportOpenStep.RelativeX);
+
+        var openY =
+            rect.Top +
+            (int)Math.Round(
+                rect.Height *
+                reportOpenStep.RelativeY);
+
+        var trainedRowX =
+            rect.Left +
+            (int)Math.Round(
+                rect.Width *
+                reportLaserStep.RelativeX);
+
+        var trainedRowY =
+            rect.Top +
+            (int)Math.Round(
+                rect.Height *
+                reportLaserStep.RelativeY);
+
+        const int ReportRowHeight =
+            15;
+
+        // ------------------------------------------------------------
+        // 1. MINIPRINTER
+        // Paso 30 entrenado cae sobre la primera fila.
+        // ------------------------------------------------------------
+        Console.WriteLine();
+        Console.WriteLine(
+            "[REPORTE][INIT] Abriendo Reporte para seleccionar Miniprinter...");
+
+        NativeMethods.SetForegroundWindow(
+            window);
+
+        NativeMethods.SetCursorPos(
+            openX,
+            openY);
+
+        Click();
+
+        await Task.Delay(
+            900,
+            cancellationToken);
+
+        Console.WriteLine(
+            $"[REPORTE][INIT] Click Miniprinter en ({trainedRowX},{trainedRowY})");
+
+        NativeMethods.SetCursorPos(
+            trainedRowX,
+            trainedRowY);
+
+        await Task.Delay(
+            450,
+            cancellationToken);
+
+        Click();
+
+        await Task.Delay(
+            1400,
+            cancellationToken);
+
+        // ------------------------------------------------------------
+        // 2. LASER
+        // Reabrir selector y hacer click una fila más abajo.
+        // ------------------------------------------------------------
+        Console.WriteLine(
+            "[REPORTE][INIT] Reabriendo Reporte para seleccionar Láser...");
+
+        NativeMethods.SetCursorPos(
+            openX,
+            openY);
+
+        Click();
+
+        await Task.Delay(
+            900,
+            cancellationToken);
+
+        var laserY =
+            trainedRowY +
+            ReportRowHeight;
+
+        Console.WriteLine(
+            $"[REPORTE][INIT] Click Láser en ({trainedRowX},{laserY})");
+
+        NativeMethods.SetCursorPos(
+            trainedRowX,
+            laserY);
+
+        await Task.Delay(
+            450,
+            cancellationToken);
+
+        Click();
+
+        await Task.Delay(
+            1800,
+            cancellationToken);
+
+        Console.WriteLine(
+            "[REPORTE][INIT][OK] Inicialización terminada: Miniprinter -> Láser.");
+    }
+
+    private static async Task SelectUserRowAfterScrollbarTopAsync(
         int anchorX,
         int anchorY,
         int rowIndex,
         int displayOrdinal,
+        string expectedName,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
         Console.WriteLine();
         Console.WriteLine(
-            $"[USUARIOS][FILA {displayOrdinal:00}] Abriendo Usuario...");
+            $"[USUARIOS][FILA {displayOrdinal:00}] " +
+            $"Abriendo Usuario; esperado={expectedName}...");
 
         NativeMethods.SetCursorPos(
             anchorX,
             anchorY);
 
         Click();
+
+        await Task.Delay(
+            900,
+            cancellationToken);
+
+        // V6.18.29 confirmado:
+        // la barra vertical responde al click físico sobre la flecha superior.
+        var scrollUpX =
+            anchorX + 73;
+
+        var scrollUpY =
+            anchorY + 20;
+
+        Console.WriteLine(
+            $"[USUARIOS][FILA {displayOrdinal:00}] " +
+            $"Forzando scrollbar arriba en ({scrollUpX},{scrollUpY}) x50...");
+
+        for (var i = 1;
+             i <= MaxUsers;
+             i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            NativeMethods.SetCursorPos(
+                scrollUpX,
+                scrollUpY);
+
+            Click();
+
+            await Task.Delay(
+                70,
+                cancellationToken);
+        }
 
         await Task.Delay(
             900,
@@ -2062,14 +4084,14 @@ public sealed class WorkflowRunner
 
         Console.WriteLine(
             $"[USUARIOS][FILA {displayOrdinal:00}] " +
-            $"Click directo en ({rowX},{rowY})");
+            $"Click fila ({rowX},{rowY}); esperado={expectedName}");
 
         NativeMethods.SetCursorPos(
             rowX,
             rowY);
 
         await Task.Delay(
-            500,
+            600,
             cancellationToken);
 
         Click();
@@ -2079,8 +4101,8 @@ public sealed class WorkflowRunner
             cancellationToken);
 
         Console.WriteLine(
-            $"[USUARIOS][FILA {displayOrdinal:00}] Click completado. " +
-            "Verificar nombre visible en Usuario.");
+            $"[USUARIOS][FILA {displayOrdinal:00}][OK] " +
+            $"Verificar visualmente Usuario={expectedName}.");
     }
 
     private static ulong CaptureUserDropdownFingerprint(
