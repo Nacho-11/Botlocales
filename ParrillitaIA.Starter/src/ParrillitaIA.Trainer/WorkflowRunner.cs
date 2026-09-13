@@ -42,7 +42,7 @@ public sealed class WorkflowRunner
     {
         Console.WriteLine();
         Console.WriteLine(
-            "=== CIERRES V6.18.50A - CONTEO TURNO SIN CLIC EN FILAS ===");
+            "=== CIERRES V6.18.54 - EXCEL + EJECUTAR CONTROLADO DURAN ===");
 
         var steps =
             workflow.Steps
@@ -139,7 +139,7 @@ public sealed class WorkflowRunner
         // No ejecuta cierres todavía. Primero comprobamos si SoftRestaurant
         // expone el selector como ComboBox/Combo clásico y si podemos leer
         // sus elementos de forma determinista.
-        await RunDuranTurnDropdownVisualDiagnosticAsync(
+        await RunControlledExcelExecuteDiagnosticAsync(
             userAnchor,
             reportOpenStep,
             reportLaserStep,
@@ -149,7 +149,7 @@ public sealed class WorkflowRunner
         Console.WriteLine(
             "[V6.18] Diagnóstico terminado. NO se ejecutaron cierres.");
         Console.WriteLine(
-            "[V6.18] Revisa [TURNO][ROW] y [TURNO][RESULT]. No se hacen clics en filas.");
+            "[V6.18] Revisa [CIERRE][WINDOWS-AFTER], [CIERRE][WINDOW] y [CIERRE][NEW-WINDOW].");
 
         // Diagnóstico activo por defecto. Al ser una decisión de runtime,
         // el compilador no marca el código productivo posterior como inaccesible.
@@ -1062,14 +1062,27 @@ public sealed class WorkflowRunner
             SoftRestaurantReportContext.Describe(
                 month));
 
+        // V6.18.52:
+        // PRUEBA CONTROLADA. Para validar DURAN contra el caso conocido,
+        // fijamos temporalmente la fecha exacta 10/09/2026.
+        //
+        // NO es la lógica final. Cuando validemos que DURAN devuelve 2
+        // turnos, volveremos a DateTime.Today.AddDays(-1).
         var target =
-            DateTime.Today.AddDays(-1);
+            new DateTime(
+                2026,
+                9,
+                10);
 
-        // V6.18.14:
-        // El MonthView se abre con la fecha actual del DTPicker seleccionada.
-        // En este flujo ese valor es HOY. Para seleccionar AYER de forma
-        // determinista no usamos coordenadas: LEFT mueve un día atrás y
-        // ENTER confirma/cierra el calendario.
+        var daysBack =
+            (DateTime.Today.Date - target.Date).Days;
+
+        if (daysBack < 0)
+        {
+            throw new InvalidOperationException(
+                $"FECHA V6.18.52: la fecha fija {target:dd/MM/yyyy} está en el futuro.");
+        }
+
         NativeMethods.SetForegroundWindow(
             main);
 
@@ -1077,22 +1090,27 @@ public sealed class WorkflowRunner
             month);
 
         await Task.Delay(
-            200,
+            150,
             cancellationToken);
 
         Console.WriteLine(
-            $"[FECHA] Seleccionando AYER por teclado: LEFT -> ENTER; " +
-            $"HOY={DateTime.Today:dd/MM/yyyy}; AYER={target:dd/MM/yyyy}");
+            $"[FECHA][TEST-10SEP] Fecha fija={target:dd/MM/yyyy}; " +
+            $"HOY={DateTime.Today:dd/MM/yyyy}; LEFT necesarios={daysBack}");
 
-        SendKey(
-            0x25, // VK_LEFT
-            false,
-            false,
-            false);
+        for (var i = 0;
+             i < daysBack;
+             i++)
+        {
+            SendKey(
+                0x25, // VK_LEFT
+                false,
+                false,
+                false);
 
-        await Task.Delay(
-            250,
-            cancellationToken);
+            await Task.Delay(
+                90,
+                cancellationToken);
+        }
 
         SendKey(
             0x0D, // VK_RETURN
@@ -1101,11 +1119,12 @@ public sealed class WorkflowRunner
             false);
 
         await Task.Delay(
-            750,
+            500,
             cancellationToken);
 
         Console.WriteLine(
-            $"[FECHA][OK] Selección de AYER confirmada por teclado: {target:dd/MM/yyyy}.");
+            $"[FECHA][OK][TEST-10SEP] Selección fija confirmada por teclado: " +
+            $"{target:dd/MM/yyyy}.");
     }
 
     private static IntPtr FindVisibleDatePicker(
@@ -1970,7 +1989,7 @@ public sealed class WorkflowRunner
             "[USUARIOS] Diagnóstico terminado. No se ejecutaron cierres.");
     }
 
-    private static async Task RunDuranTurnDropdownVisualDiagnosticAsync(
+    private static async Task RunControlledExcelExecuteDiagnosticAsync(
         WorkflowStep userAnchor,
         WorkflowStep reportOpenStep,
         WorkflowStep reportLaserStep,
@@ -1978,11 +1997,8 @@ public sealed class WorkflowRunner
     {
         Console.WriteLine();
         Console.WriteLine(
-            "=== DURAN TURN DROPDOWN COUNT-ONLY V6.18.50A ===");
+            "=== CONTROLLED EXCEL + EXECUTE V6.18.54 ===");
 
-        // ------------------------------------------------------------
-        // 1. Enumerar usuarios y seleccionar DURAN por nombre accesible.
-        // ------------------------------------------------------------
         var userSelection =
             await GetUserAnchorAsync(
                 userAnchor,
@@ -1994,41 +2010,14 @@ public sealed class WorkflowRunner
         var userY =
             userSelection.AnchorY;
 
-        await OpenUserDropdownAsync(
-            userX,
-            userY,
-            cancellationToken);
-
-        await MoveAccessibleUserListToTopAsync(
-            userX,
-            userY,
-            cancellationToken);
-
-        var orderedUsers =
-            await EnumerateAllAccessibleUsersAsync(
-                userX,
-                userY,
-                cancellationToken);
-
-        SendKey(
-            0x1B,
-            false,
-            false,
-            false);
-
-        await Task.Delay(
-            350,
-            cancellationToken);
-
         const string targetUser =
             "DURAN";
 
         var selected =
-            await SelectAccessibleUserByNameAsync(
+            await SelectAccessibleUserDirectAsync(
                 userX,
                 userY,
                 targetUser,
-                orderedUsers,
                 cancellationToken);
 
         if (!selected)
@@ -2038,28 +2027,16 @@ public sealed class WorkflowRunner
         }
 
         Console.WriteLine(
-            "[TURNO][PREP] Usuario DURAN seleccionado.");
+            "[CIERRE][PREP] DURAN seleccionado.");
 
-        // Reporte: Miniprinter -> Láser una sola vez.
         await SelectInitialReportMiniprinterThenLaserAsync(
             reportOpenStep,
             reportLaserStep,
             cancellationToken);
 
         await Task.Delay(
-            800,
+            400,
             cancellationToken);
-
-        // ------------------------------------------------------------
-        // 2. Encontrar controles reales.
-        // ------------------------------------------------------------
-        var turn =
-            FindAccessibleControlByName(
-                "cboturno",
-                305,
-                245,
-                719,
-                518);
 
         var turnInfo =
             FindAccessibleControlByName(
@@ -2069,16 +2046,11 @@ public sealed class WorkflowRunner
                 719,
                 518);
 
-        if (turn is null ||
-            turnInfo is null)
+        if (turnInfo is null)
         {
             throw new InvalidOperationException(
-                "No se encontró cboturno o txtprecorte.");
+                "No se encontró txtprecorte.");
         }
-
-        Console.WriteLine(
-            $"[TURNO][FOUND] cboturno=({turn.Left},{turn.Top},{turn.Width},{turn.Height}); " +
-            $"txtprecorte=({turnInfo.Left},{turnInfo.Top},{turnInfo.Width},{turnInfo.Height})");
 
         var hasTurn =
             HasVisibleTurnData(
@@ -2090,155 +2062,311 @@ public sealed class WorkflowRunner
                 out var sampledPixels);
 
         Console.WriteLine(
-            $"[TURNO][HAS-DATA] Ink={darkPixels}/{sampledPixels}; TieneTurno={hasTurn}");
+            $"[CIERRE][TURN-CHECK] Ink={darkPixels}/{sampledPixels}; TieneTurno={hasTurn}");
 
         if (!hasTurn)
         {
             Console.WriteLine(
-                "[TURNO][STOP] DURAN aparece sin turnos. No se abre dropdown.");
+                "[CIERRE][STOP] DURAN no tiene turno visible. No se ejecutará nada.");
 
             return;
         }
 
-        // ------------------------------------------------------------
-        // 3. Abrir dropdown REAL de turno.
-        // ------------------------------------------------------------
-        var arrowX =
-            turn.Left +
-            turn.Width -
-            8;
+        var excel =
+            FindAccessibleControlByName(
+                "Excel",
+                305,
+                245,
+                719,
+                518);
 
-        var arrowY =
-            turn.Top +
-            turn.Height / 2;
+        var ejecutar =
+            FindAccessibleControlByName(
+                "Ejecutar",
+                305,
+                245,
+                719,
+                518);
 
-        NativeMethods.SetCursorPos(
-            arrowX,
-            arrowY);
+        if (excel is null)
+            throw new InvalidOperationException(
+                "No se encontró el destino Excel.");
+
+        if (ejecutar is null)
+            throw new InvalidOperationException(
+                "No se encontró el botón Ejecutar.");
 
         Console.WriteLine(
-            $"[TURNO][OPEN] Click flecha cboturno=({arrowX},{arrowY})");
+            $"[CIERRE][EXCEL] Bounds=({excel.Left},{excel.Top},{excel.Width},{excel.Height}); State={excel.State}");
+
+        Console.WriteLine(
+            $"[CIERRE][EJECUTAR] Bounds=({ejecutar.Left},{ejecutar.Top},{ejecutar.Width},{ejecutar.Height}); State={ejecutar.State}");
+
+        var excelX =
+            excel.Left +
+            excel.Width / 2;
+
+        var excelY =
+            excel.Top +
+            excel.Height / 2;
+
+        Console.WriteLine(
+            $"[CIERRE][EXCEL] Click=({excelX},{excelY})");
+
+        NativeMethods.SetCursorPos(
+            excelX,
+            excelY);
 
         Click();
 
         await Task.Delay(
-            900,
+            600,
             cancellationToken);
 
-        // ------------------------------------------------------------
-        // 4. Detectar visualmente el popup del dropdown.
-        //
-        // El combo mide 44x22. Cuando abre, buscamos justo debajo y
-        // medimos franjas horizontales de 15 px. No intentamos OCR:
-        // solo detectamos si una fila tiene tinta/texto visible.
-        // ------------------------------------------------------------
-        var scanLeft =
-            turn.Left;
-
-        var scanTop =
-            turn.Top +
-            turn.Height;
-
-        var scanRight =
-            turnInfo.Left +
-            turnInfo.Width;
-
-        var scanWidth =
-            scanRight -
-            scanLeft;
-
-        const int rowHeight =
-            15;
-
-        const int maxRows =
-            8;
+        var beforeWindows =
+            CaptureTopLevelWindowsSimple();
 
         Console.WriteLine(
-            $"[TURNO][VISUAL-SCAN] Area inicial=({scanLeft},{scanTop},{scanWidth},{rowHeight * maxRows})");
+            $"[CIERRE][WINDOWS-BEFORE] {beforeWindows.Count}");
 
-        // Fondo de referencia tomado justo debajo del bloque de turno,
-        // en una zona del formulario que normalmente es naranja/clara.
-        var background =
-            SampleAverageColorSparse(
-                scanLeft,
-                scanTop + rowHeight * maxRows + 8,
-                scanWidth,
-                10);
+        var executeX =
+            ejecutar.Left +
+            ejecutar.Width / 2;
+
+        var executeY =
+            ejecutar.Top +
+            ejecutar.Height / 2;
 
         Console.WriteLine(
-            $"[TURNO][BACKGROUND] R={background.R}; G={background.G}; B={background.B}");
+            $"[CIERRE][EJECUTAR] Click=({executeX},{executeY})");
 
-        var detectedRows =
-            0;
+        NativeMethods.SetCursorPos(
+            executeX,
+            executeY);
 
-        var rowFlags =
-            new List<bool>();
+        Click();
 
-        for (var rowIndex = 0;
-             rowIndex < maxRows;
-             rowIndex++)
+        Console.WriteLine(
+            "[CIERRE][EJECUTAR] Click enviado. Esperando resultado...");
+
+        await Task.Delay(
+            2500,
+            cancellationToken);
+
+        var afterWindows =
+            CaptureTopLevelWindowsSimple();
+
+        Console.WriteLine();
+        Console.WriteLine(
+            $"[CIERRE][WINDOWS-AFTER] {afterWindows.Count}");
+
+        foreach (var window in afterWindows)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var rowTop =
-                scanTop +
-                rowIndex * rowHeight;
+            var existedBefore =
+                beforeWindows.Any(
+                    x => x.Handle == window.Handle);
 
             Console.WriteLine(
-                $"[TURNO][ROW {rowIndex + 1:00}] Analizando Y={rowTop}...");
+                $"[CIERRE][WINDOW] " +
+                $"Nuevo={!existedBefore}; " +
+                $"HWND=0x{window.Handle.ToInt64():X}; " +
+                $"Class=\"{window.ClassName}\"; " +
+                $"Title=\"{window.Title}\"; " +
+                $"Rect=({window.Left},{window.Top},{window.Width},{window.Height})");
+        }
 
-            var stats =
-                AnalyzeTurnDropdownRow(
-                    scanLeft,
-                    rowTop,
-                    scanWidth,
-                    rowHeight,
-                    background);
+        var newWindow =
+            afterWindows.FirstOrDefault(
+                w => !beforeWindows.Any(
+                    b => b.Handle == w.Handle));
 
-            var isOption =
-                stats.BlueLikeRatio >= 0.10 ||
-                stats.ColorDifferenceRatio >= 0.18;
+        if (newWindow is not null)
+        {
+            var centerX =
+                newWindow.Left +
+                newWindow.Width / 2;
 
-            rowFlags.Add(
-                isOption);
+            var centerY =
+                newWindow.Top +
+                newWindow.Height / 2;
 
+            Console.WriteLine();
             Console.WriteLine(
-                $"[TURNO][ROW {rowIndex + 1:00}] " +
-                $"BlueLike={stats.BlueLikePixels}/{stats.SampledPixels} " +
-                $"({stats.BlueLikeRatio:P1}); " +
-                $"Diff={stats.DifferentPixels}/{stats.SampledPixels} " +
-                $"({stats.ColorDifferenceRatio:P1}); " +
-                $"EsOpcion={isOption}");
+                $"[CIERRE][NEW-WINDOW] HWND=0x{newWindow.Handle.ToInt64():X}; " +
+                $"Class=\"{newWindow.ClassName}\"; Title=\"{newWindow.Title}\"");
 
-            if (isOption)
-            {
-                detectedRows++;
-            }
-            else if (detectedRows > 0)
-            {
-                // En este combo las opciones son contiguas.
-                break;
-            }
+            DumpAccessibleAtPoint(
+                "POST-EJECUTAR-CENTRO",
+                centerX,
+                centerY);
+        }
+        else
+        {
+            Console.WriteLine();
+            Console.WriteLine(
+                "[CIERRE][NEW-WINDOW] No se detectó ventana top-level nueva.");
         }
 
         Console.WriteLine();
         Console.WriteLine(
-            $"[TURNO][RESULT] DURAN opciones visuales detectadas={detectedRows}");
-
-        // ------------------------------------------------------------
-        // 5. IMPORTANTE:
-        //    NO hacemos clic en ninguna fila del dropdown.
-        //
-        //    En V6.18.50 una coordenada fuera del popup cayó sobre
-        //    "Convertir moneda extranjera" y cambió su checkbox.
-        //
-        //    Este diagnóstico es SOLO CONTEO VISUAL.
-        // ------------------------------------------------------------
-        Console.WriteLine(
-            "[TURNO][SAFE] No se hará clic en ninguna opción de Turno.");
+            "[V6.18.54] Se seleccionó Excel y se pulsó Ejecutar.");
 
         Console.WriteLine(
-            "[TURNO][SAFE] Cerrando dropdown únicamente con ESC.");
+            "[V6.18.54] NO se escribió nombre de archivo.");
+
+        Console.WriteLine(
+            "[V6.18.54] NO se pulsó Guardar/Save.");
+    }
+
+    private sealed class SimpleWindowSnapshot
+    {
+        public IntPtr Handle { get; init; }
+        public string ClassName { get; init; } = "";
+        public string Title { get; init; } = "";
+        public int Left { get; init; }
+        public int Top { get; init; }
+        public int Width { get; init; }
+        public int Height { get; init; }
+    }
+
+    private static List<SimpleWindowSnapshot> CaptureTopLevelWindowsSimple()
+    {
+        var result =
+            new List<SimpleWindowSnapshot>();
+
+        NativeMethods.EnumWindows(
+            (hWnd, _) =>
+            {
+                if (!NativeMethods.IsWindowVisible(
+                        hWnd))
+                {
+                    return true;
+                }
+
+                if (!NativeMethods.GetWindowRect(
+                        hWnd,
+                        out var rect))
+                {
+                    return true;
+                }
+
+                var width =
+                    rect.Right -
+                    rect.Left;
+
+                var height =
+                    rect.Bottom -
+                    rect.Top;
+
+                if (width <= 0 ||
+                    height <= 0)
+                {
+                    return true;
+                }
+
+                result.Add(
+                    new SimpleWindowSnapshot
+                    {
+                        Handle = hWnd,
+                        ClassName = GetClassName(hWnd),
+                        Title = GetWindowText(hWnd).Trim(),
+                        Left = rect.Left,
+                        Top = rect.Top,
+                        Width = width,
+                        Height = height
+                    });
+
+                return true;
+            },
+            IntPtr.Zero);
+
+        return result;
+    }
+
+    private static async Task<bool> SelectAccessibleUserDirectAsync(
+        int anchorX,
+        int anchorY,
+        string targetName,
+        CancellationToken cancellationToken)
+    {
+        await OpenUserDropdownAsync(
+            anchorX,
+            anchorY,
+            cancellationToken);
+
+        for (var guard = 0;
+             guard < MaxUsers;
+             guard++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var visible =
+                ReadVisibleAccessibleUsers(
+                    anchorX,
+                    anchorY);
+
+            var target =
+                visible.FirstOrDefault(
+                    x => string.Equals(
+                        x.Name,
+                        targetName,
+                        StringComparison.OrdinalIgnoreCase));
+
+            if (target is not null)
+            {
+                var clickX =
+                    target.Left +
+                    target.Width / 2;
+
+                var clickY =
+                    target.Top +
+                    target.Height / 2;
+
+                Console.WriteLine(
+                    $"[A11Y][DIRECT] \"{target.Name}\" " +
+                    $"Click=({clickX},{clickY})");
+
+                NativeMethods.SetCursorPos(
+                    clickX,
+                    clickY);
+
+                Click();
+
+                await Task.Delay(
+                    400,
+                    cancellationToken);
+
+                return true;
+            }
+
+            if (visible.Count == 0)
+            {
+                SendKey(
+                    0x1B,
+                    false,
+                    false,
+                    false);
+
+                return false;
+            }
+
+            if (!ClickAccessibleScrollLineDown(
+                    anchorX,
+                    anchorY))
+            {
+                SendKey(
+                    0x1B,
+                    false,
+                    false,
+                    false);
+
+                return false;
+            }
+
+            await Task.Delay(
+                90,
+                cancellationToken);
+        }
 
         SendKey(
             0x1B,
@@ -2246,16 +2374,93 @@ public sealed class WorkflowRunner
             false,
             false);
 
-        await Task.Delay(
-            300,
-            cancellationToken);
+        return false;
+    }
 
-        Console.WriteLine();
-        Console.WriteLine(
-            "[V6.18.50A] Diagnóstico visual DURAN terminado.");
+    private static ulong CaptureTurnNumberFingerprint(
+        int turnLeft,
+        int turnTop,
+        int turnWidth,
+        int turnHeight)
+    {
+        var hdc =
+            NativeMethods.GetDC(
+                IntPtr.Zero);
 
-        Console.WriteLine(
-            "[V6.18.50A] NO se ejecutó ni exportó ningún reporte.");
+        if (hdc == IntPtr.Zero)
+            return 0;
+
+        try
+        {
+            ulong hash =
+                1469598103934665603UL;
+
+            var left =
+                turnLeft + 2;
+
+            var top =
+                turnTop + 3;
+
+            var width =
+                Math.Max(
+                    12,
+                    turnWidth - 19);
+
+            var height =
+                Math.Max(
+                    10,
+                    turnHeight - 6);
+
+            for (var y = top;
+                 y < top + height;
+                 y += 2)
+            {
+                for (var x = left;
+                     x < left + width;
+                     x += 2)
+                {
+                    var pixel =
+                        NativeMethods.GetPixel(
+                            hdc,
+                            x,
+                            y);
+
+                    var r =
+                        (int)(pixel & 0xFF);
+
+                    var g =
+                        (int)((pixel >> 8) & 0xFF);
+
+                    var b =
+                        (int)((pixel >> 16) & 0xFF);
+
+                    var luminance =
+                        (r * 299 +
+                         g * 587 +
+                         b * 114) /
+                        1000;
+
+                    var bit =
+                        luminance < 160
+                            ? 1UL
+                            : 0UL;
+
+                    hash ^=
+                        bit;
+
+                    hash *=
+                        1099511628211UL;
+                }
+            }
+
+            return hash;
+        }
+        finally
+        {
+            NativeMethods.ReleaseDC(
+                IntPtr.Zero,
+                hdc);
+        }
     }
 
     private readonly record struct RgbSample(
