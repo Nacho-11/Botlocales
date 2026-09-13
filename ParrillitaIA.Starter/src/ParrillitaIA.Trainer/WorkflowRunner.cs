@@ -42,7 +42,7 @@ public sealed class WorkflowRunner
     {
         Console.WriteLine();
         Console.WriteLine(
-            "=== CIERRES V6.18.54 - EXCEL + EJECUTAR CONTROLADO DURAN ===");
+            "=== CIERRES V6.18.58A - BARRIDO USUARIOS CON CIERRE ===");
 
         var steps =
             workflow.Steps
@@ -149,7 +149,7 @@ public sealed class WorkflowRunner
         Console.WriteLine(
             "[V6.18] Diagnóstico terminado. NO se ejecutaron cierres.");
         Console.WriteLine(
-            "[V6.18] Revisa [CIERRE][WINDOWS-AFTER], [CIERRE][WINDOW] y [CIERRE][NEW-WINDOW].");
+            "[V6.18] Revisa [SCAN][RESULT], [SCAN][CON-CIERRE] y [SAVE-AS][READY].");
 
         // Diagnóstico activo por defecto. Al ser una decisión de runtime,
         // el compilador no marca el código productivo posterior como inaccesible.
@@ -1062,26 +1062,8 @@ public sealed class WorkflowRunner
             SoftRestaurantReportContext.Describe(
                 month));
 
-        // V6.18.52:
-        // PRUEBA CONTROLADA. Para validar DURAN contra el caso conocido,
-        // fijamos temporalmente la fecha exacta 10/09/2026.
-        //
-        // NO es la lógica final. Cuando validemos que DURAN devuelve 2
-        // turnos, volveremos a DateTime.Today.AddDays(-1).
         var target =
-            new DateTime(
-                2026,
-                9,
-                10);
-
-        var daysBack =
-            (DateTime.Today.Date - target.Date).Days;
-
-        if (daysBack < 0)
-        {
-            throw new InvalidOperationException(
-                $"FECHA V6.18.52: la fecha fija {target:dd/MM/yyyy} está en el futuro.");
-        }
+            DateTime.Today.AddDays(-1);
 
         NativeMethods.SetForegroundWindow(
             main);
@@ -1090,27 +1072,22 @@ public sealed class WorkflowRunner
             month);
 
         await Task.Delay(
-            150,
+            200,
             cancellationToken);
 
         Console.WriteLine(
-            $"[FECHA][TEST-10SEP] Fecha fija={target:dd/MM/yyyy}; " +
-            $"HOY={DateTime.Today:dd/MM/yyyy}; LEFT necesarios={daysBack}");
+            $"[FECHA] Seleccionando AYER por teclado: LEFT -> ENTER; " +
+            $"HOY={DateTime.Today:dd/MM/yyyy}; AYER={target:dd/MM/yyyy}");
 
-        for (var i = 0;
-             i < daysBack;
-             i++)
-        {
-            SendKey(
-                0x25, // VK_LEFT
-                false,
-                false,
-                false);
+        SendKey(
+            0x25, // VK_LEFT
+            false,
+            false,
+            false);
 
-            await Task.Delay(
-                90,
-                cancellationToken);
-        }
+        await Task.Delay(
+            250,
+            cancellationToken);
 
         SendKey(
             0x0D, // VK_RETURN
@@ -1119,12 +1096,11 @@ public sealed class WorkflowRunner
             false);
 
         await Task.Delay(
-            500,
+            750,
             cancellationToken);
 
         Console.WriteLine(
-            $"[FECHA][OK][TEST-10SEP] Selección fija confirmada por teclado: " +
-            $"{target:dd/MM/yyyy}.");
+            $"[FECHA][OK] Selección de AYER confirmada por teclado: {target:dd/MM/yyyy}.");
     }
 
     private static IntPtr FindVisibleDatePicker(
@@ -1997,7 +1973,7 @@ public sealed class WorkflowRunner
     {
         Console.WriteLine();
         Console.WriteLine(
-            "=== CONTROLLED EXCEL + EXECUTE V6.18.54 ===");
+            "=== USER CLOSURE SCAN V6.18.58A ===");
 
         var userSelection =
             await GetUserAnchorAsync(
@@ -2010,24 +1986,61 @@ public sealed class WorkflowRunner
         var userY =
             userSelection.AnchorY;
 
-        const string targetUser =
-            "DURAN";
+        // ------------------------------------------------------------
+        // 1. Enumerar todos los usuarios reales del combo.
+        // ------------------------------------------------------------
+        await OpenUserDropdownAsync(
+            userX,
+            userY,
+            cancellationToken);
 
-        var selected =
-            await SelectAccessibleUserDirectAsync(
+        await MoveAccessibleUserListToTopAsync(
+            userX,
+            userY,
+            cancellationToken);
+
+        var orderedUsers =
+            await EnumerateAllAccessibleUsersAsync(
                 userX,
                 userY,
-                targetUser,
                 cancellationToken);
 
-        if (!selected)
+        SendKey(
+            0x1B,
+            false,
+            false,
+            false);
+
+        if (orderedUsers.Count == 0)
         {
             throw new InvalidOperationException(
-                "No se pudo seleccionar DURAN.");
+                "No se pudo enumerar ningún usuario.");
         }
 
+        Console.WriteLine();
         Console.WriteLine(
-            "[CIERRE][PREP] DURAN seleccionado.");
+            $"[SCAN][USERS] Usuarios enumerados={orderedUsers.Count}");
+
+        // ------------------------------------------------------------
+        // 2. Inicializar Reporte una sola vez.
+        //    Después solo cambiaremos Usuario.
+        // ------------------------------------------------------------
+        var firstUser =
+            orderedUsers[0];
+
+        var firstSelected =
+            await SelectAccessibleUserByNameAsync(
+                userX,
+                userY,
+                firstUser,
+                orderedUsers,
+                cancellationToken);
+
+        if (!firstSelected)
+        {
+            throw new InvalidOperationException(
+                $"No se pudo seleccionar usuario inicial {firstUser}.");
+        }
 
         await SelectInitialReportMiniprinterThenLaserAsync(
             reportOpenStep,
@@ -2035,42 +2048,137 @@ public sealed class WorkflowRunner
             cancellationToken);
 
         await Task.Delay(
-            400,
+            300,
             cancellationToken);
 
-        var turnInfo =
-            FindAccessibleControlByName(
-                "txtprecorte",
-                305,
-                245,
-                719,
-                518);
+        var usersWithClosure =
+            new List<string>();
 
-        if (turnInfo is null)
+        // ------------------------------------------------------------
+        // 3. Recorrer TODOS los usuarios y detectar 0 vs >=1 turno.
+        // ------------------------------------------------------------
+        for (var i = 0;
+             i < orderedUsers.Count;
+             i++)
         {
-            throw new InvalidOperationException(
-                "No se encontró txtprecorte.");
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var user =
+                orderedUsers[i];
+
+            if (i > 0)
+            {
+                var selected =
+                    await SelectAccessibleUserByNameAsync(
+                        userX,
+                        userY,
+                        user,
+                        orderedUsers,
+                        cancellationToken);
+
+                if (!selected)
+                {
+                    Console.WriteLine(
+                        $"[SCAN][{i + 1:00}/{orderedUsers.Count:00}] " +
+                        $"{user}: ERROR_SELECCION");
+
+                    continue;
+                }
+            }
+
+            await Task.Delay(
+                180,
+                cancellationToken);
+
+            var turnInfo =
+                FindAccessibleControlByName(
+                    "txtprecorte",
+                    305,
+                    245,
+                    719,
+                    518);
+
+            if (turnInfo is null)
+            {
+                Console.WriteLine(
+                    $"[SCAN][{i + 1:00}/{orderedUsers.Count:00}] " +
+                    $"{user}: txtprecorte NO encontrado");
+
+                continue;
+            }
+
+            var hasTurn =
+                HasVisibleTurnData(
+                    turnInfo.Left,
+                    turnInfo.Top,
+                    turnInfo.Width,
+                    turnInfo.Height,
+                    out var darkPixels,
+                    out var sampledPixels);
+
+            Console.WriteLine(
+                $"[SCAN][{i + 1:00}/{orderedUsers.Count:00}] " +
+                $"{user,-16} Ink={darkPixels}/{sampledPixels} " +
+                $"Cierre={(hasTurn ? "SI" : "NO")}");
+
+            if (hasTurn)
+            {
+                usersWithClosure.Add(
+                    user);
+            }
         }
 
-        var hasTurn =
-            HasVisibleTurnData(
-                turnInfo.Left,
-                turnInfo.Top,
-                turnInfo.Width,
-                turnInfo.Height,
-                out var darkPixels,
-                out var sampledPixels);
-
+        Console.WriteLine();
         Console.WriteLine(
-            $"[CIERRE][TURN-CHECK] Ink={darkPixels}/{sampledPixels}; TieneTurno={hasTurn}");
+            $"[SCAN][RESULT] Usuarios={orderedUsers.Count}; " +
+            $"ConCierre={usersWithClosure.Count}; " +
+            $"SinCierre={orderedUsers.Count - usersWithClosure.Count}");
 
-        if (!hasTurn)
+        if (usersWithClosure.Count > 0)
         {
             Console.WriteLine(
-                "[CIERRE][STOP] DURAN no tiene turno visible. No se ejecutará nada.");
+                "[SCAN][CON-CIERRE] " +
+                string.Join(
+                    ", ",
+                    usersWithClosure));
+        }
+
+        if (usersWithClosure.Count == 0)
+        {
+            Console.WriteLine(
+                "[SCAN][STOP] No se encontraron cierres para AYER.");
 
             return;
         }
+
+        // ------------------------------------------------------------
+        // 4. Para esta versión, validar Guardar como SOLO con el primer
+        //    usuario que realmente tenga cierre.
+        // ------------------------------------------------------------
+        var targetUser =
+            usersWithClosure[0];
+
+        Console.WriteLine();
+        Console.WriteLine(
+            $"[SCAN][TEST-SAVE-AS] Primer usuario con cierre={targetUser}");
+
+        var selectedTarget =
+            await SelectAccessibleUserByNameAsync(
+                userX,
+                userY,
+                targetUser,
+                orderedUsers,
+                cancellationToken);
+
+        if (!selectedTarget)
+        {
+            throw new InvalidOperationException(
+                $"No se pudo volver a seleccionar {targetUser}.");
+        }
+
+        await Task.Delay(
+            250,
+            cancellationToken);
 
         var excel =
             FindAccessibleControlByName(
@@ -2096,12 +2204,6 @@ public sealed class WorkflowRunner
             throw new InvalidOperationException(
                 "No se encontró el botón Ejecutar.");
 
-        Console.WriteLine(
-            $"[CIERRE][EXCEL] Bounds=({excel.Left},{excel.Top},{excel.Width},{excel.Height}); State={excel.State}");
-
-        Console.WriteLine(
-            $"[CIERRE][EJECUTAR] Bounds=({ejecutar.Left},{ejecutar.Top},{ejecutar.Width},{ejecutar.Height}); State={ejecutar.State}");
-
         var excelX =
             excel.Left +
             excel.Width / 2;
@@ -2110,9 +2212,6 @@ public sealed class WorkflowRunner
             excel.Top +
             excel.Height / 2;
 
-        Console.WriteLine(
-            $"[CIERRE][EXCEL] Click=({excelX},{excelY})");
-
         NativeMethods.SetCursorPos(
             excelX,
             excelY);
@@ -2120,14 +2219,11 @@ public sealed class WorkflowRunner
         Click();
 
         await Task.Delay(
-            600,
+            500,
             cancellationToken);
 
         var beforeWindows =
             CaptureTopLevelWindowsSimple();
-
-        Console.WriteLine(
-            $"[CIERRE][WINDOWS-BEFORE] {beforeWindows.Count}");
 
         var executeX =
             ejecutar.Left +
@@ -2137,9 +2233,6 @@ public sealed class WorkflowRunner
             ejecutar.Top +
             ejecutar.Height / 2;
 
-        Console.WriteLine(
-            $"[CIERRE][EJECUTAR] Click=({executeX},{executeY})");
-
         NativeMethods.SetCursorPos(
             executeX,
             executeY);
@@ -2147,75 +2240,466 @@ public sealed class WorkflowRunner
         Click();
 
         Console.WriteLine(
-            "[CIERRE][EJECUTAR] Click enviado. Esperando resultado...");
+            "[CIERRE][EJECUTAR] Click enviado. Esperando Guardar como...");
 
         await Task.Delay(
-            2500,
+            2200,
             cancellationToken);
 
         var afterWindows =
             CaptureTopLevelWindowsSimple();
 
-        Console.WriteLine();
-        Console.WriteLine(
-            $"[CIERRE][WINDOWS-AFTER] {afterWindows.Count}");
-
-        foreach (var window in afterWindows)
-        {
-            var existedBefore =
-                beforeWindows.Any(
-                    x => x.Handle == window.Handle);
-
-            Console.WriteLine(
-                $"[CIERRE][WINDOW] " +
-                $"Nuevo={!existedBefore}; " +
-                $"HWND=0x{window.Handle.ToInt64():X}; " +
-                $"Class=\"{window.ClassName}\"; " +
-                $"Title=\"{window.Title}\"; " +
-                $"Rect=({window.Left},{window.Top},{window.Width},{window.Height})");
-        }
-
-        var newWindow =
+        var saveAs =
             afterWindows.FirstOrDefault(
-                w => !beforeWindows.Any(
-                    b => b.Handle == w.Handle));
+                w =>
+                    !beforeWindows.Any(
+                        b => b.Handle == w.Handle) &&
+                    string.Equals(
+                        w.ClassName,
+                        "#32770",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    w.Title.Contains(
+                        "Guardar",
+                        StringComparison.OrdinalIgnoreCase));
 
-        if (newWindow is not null)
+        if (saveAs is null)
         {
-            var centerX =
-                newWindow.Left +
-                newWindow.Width / 2;
-
-            var centerY =
-                newWindow.Top +
-                newWindow.Height / 2;
-
-            Console.WriteLine();
             Console.WriteLine(
-                $"[CIERRE][NEW-WINDOW] HWND=0x{newWindow.Handle.ToInt64():X}; " +
-                $"Class=\"{newWindow.ClassName}\"; Title=\"{newWindow.Title}\"");
+                "[CIERRE][STOP] No apareció Guardar como.");
 
-            DumpAccessibleAtPoint(
-                "POST-EJECUTAR-CENTRO",
-                centerX,
-                centerY);
+            return;
         }
-        else
-        {
-            Console.WriteLine();
-            Console.WriteLine(
-                "[CIERRE][NEW-WINDOW] No se detectó ventana top-level nueva.");
-        }
+
+        Console.WriteLine(
+            $"[CIERRE][SAVE-AS] HWND=0x{saveAs.Handle.ToInt64():X}; " +
+            $"Title=\"{saveAs.Title}\"");
+
+        // ------------------------------------------------------------
+        // 5. Leer ruta configurada y resolver carpeta del mes de AYER.
+        // ------------------------------------------------------------
+        var configPath =
+            FindAgentAppSettingsPath();
+
+        var closuresRoot =
+            ReadCashClosuresRootFromAgent(
+                configPath);
+
+        var reportDate =
+            DateTime.Today.AddDays(-1);
+
+        var monthFolder =
+            ResolveExistingMonthFolder(
+                closuresRoot,
+                reportDate);
+
+        var safeUserName =
+            MakeSafeFilePart(
+                targetUser);
+
+        var outputFileName =
+            $"{reportDate:yyyy-MM-dd}_{safeUserName}_T01.xlsx";
+
+        var expectedFullPath =
+            Path.Combine(
+                monthFolder,
+                outputFileName);
+
+        Console.WriteLine(
+            $"[CONFIG][MES] Fecha={reportDate:dd/MM/yyyy}; Carpeta=\"{monthFolder}\"");
+
+        Console.WriteLine(
+            $"[SAVE-AS][TARGET] \"{expectedFullPath}\"");
+
+        NativeMethods.SetForegroundWindow(
+            saveAs.Handle);
+
+        await Task.Delay(
+            250,
+            cancellationToken);
+
+        SendKey(
+            0x4C, // Ctrl+L
+            true,
+            false,
+            false);
+
+        await Task.Delay(
+            120,
+            cancellationToken);
+
+        SendUnicodeText(
+            monthFolder);
+
+        await Task.Delay(
+            120,
+            cancellationToken);
+
+        SendKey(
+            0x0D,
+            false,
+            false,
+            false);
+
+        await Task.Delay(
+            700,
+            cancellationToken);
+
+        SendKey(
+            0x4E, // Alt+N
+            false,
+            false,
+            true);
+
+        await Task.Delay(
+            150,
+            cancellationToken);
+
+        SendKey(
+            0x41, // Ctrl+A
+            true,
+            false,
+            false);
+
+        await Task.Delay(
+            80,
+            cancellationToken);
+
+        SendUnicodeText(
+            outputFileName);
+
+        await Task.Delay(
+            350,
+            cancellationToken);
 
         Console.WriteLine();
         Console.WriteLine(
-            "[V6.18.54] Se seleccionó Excel y se pulsó Ejecutar.");
+            $"[SAVE-AS][READY] Usuario=\"{targetUser}\"");
 
         Console.WriteLine(
-            "[V6.18.54] NO se escribió nombre de archivo.");
+            $"[SAVE-AS][READY] Ruta=\"{monthFolder}\"");
 
         Console.WriteLine(
-            "[V6.18.54] NO se pulsó Guardar/Save.");
+            $"[SAVE-AS][READY] Nombre=\"{outputFileName}\"");
+
+        Console.WriteLine(
+            "[V6.18.58A] Barrido completo realizado.");
+
+        Console.WriteLine(
+            "[V6.18.58A] NO se pulsó Guardar/Save.");
+    }
+
+    private static string MakeSafeFilePart(
+        string value)
+    {
+        var invalid =
+            Path.GetInvalidFileNameChars();
+
+        var sb =
+            new StringBuilder();
+
+        foreach (var ch in value.Trim())
+        {
+            sb.Append(
+                invalid.Contains(ch)
+                    ? '_'
+                    : ch);
+        }
+
+        return sb
+            .ToString()
+            .Replace(
+                ' ',
+                '_')
+            .ToUpperInvariant();
+    }
+
+    private static string FindAgentAppSettingsPath()
+    {
+        var explicitPath =
+            Environment.GetEnvironmentVariable(
+                "PARRILLITA_AGENT_APPSETTINGS");
+
+        if (!string.IsNullOrWhiteSpace(
+                explicitPath) &&
+            File.Exists(
+                explicitPath))
+        {
+            return Path.GetFullPath(
+                explicitPath);
+        }
+
+        var starts =
+            new[]
+            {
+                AppContext.BaseDirectory,
+                Environment.CurrentDirectory
+            }
+            .Where(
+                x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(
+                StringComparer.OrdinalIgnoreCase);
+
+        foreach (var start in starts)
+        {
+            var current =
+                new DirectoryInfo(
+                    Path.GetFullPath(start));
+
+            for (var depth = 0;
+                 depth < 8 &&
+                 current is not null;
+                 depth++,
+                 current = current.Parent)
+            {
+                var candidates =
+                    new[]
+                    {
+                        Path.Combine(
+                            current.FullName,
+                            "src",
+                            "ParrillitaIA.Agent",
+                            "appsettings.json"),
+
+                        Path.Combine(
+                            current.FullName,
+                            "ParrillitaIA.Starter",
+                            "src",
+                            "ParrillitaIA.Agent",
+                            "appsettings.json")
+                    };
+
+                foreach (var candidate in candidates)
+                {
+                    if (File.Exists(candidate))
+                        return Path.GetFullPath(candidate);
+                }
+            }
+        }
+
+        throw new FileNotFoundException(
+            "No se encontró ParrillitaIA.Agent/appsettings.json. " +
+            "También puede definirse PARRILLITA_AGENT_APPSETTINGS.");
+    }
+
+    private static string ReadCashClosuresRootFromAgent(
+        string appSettingsPath)
+    {
+        using var stream =
+            File.OpenRead(
+                appSettingsPath);
+
+        using var json =
+            JsonDocument.Parse(
+                stream);
+
+        if (!json.RootElement.TryGetProperty(
+                "Storage",
+                out var storage))
+        {
+            throw new InvalidOperationException(
+                "appsettings.json no contiene la sección Storage.");
+        }
+
+        if (!storage.TryGetProperty(
+                "OneDriveCashClosuresRoot",
+                out var rootProperty))
+        {
+            throw new InvalidOperationException(
+                "Storage no contiene OneDriveCashClosuresRoot.");
+        }
+
+        var value =
+            rootProperty.GetString();
+
+        if (string.IsNullOrWhiteSpace(
+                value))
+        {
+            throw new InvalidOperationException(
+                "Storage:OneDriveCashClosuresRoot está vacío.");
+        }
+
+        return Path.GetFullPath(
+            Environment.ExpandEnvironmentVariables(
+                value.Trim()));
+    }
+
+    private static string ResolveExistingMonthFolder(
+        string closuresRoot,
+        DateTime reportDate)
+    {
+        if (!Directory.Exists(closuresRoot))
+            throw new DirectoryNotFoundException(
+                $"No existe OneDriveCashClosuresRoot: {closuresRoot}");
+
+        var monthNames = new[]
+        {
+            "",
+            "ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO",
+            "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"
+        };
+
+        var monthName = monthNames[reportDate.Month];
+        var month2 = reportDate.Month.ToString("00");
+
+        var candidates =
+            Directory.GetDirectories(closuresRoot)
+                .Select(path => new
+                {
+                    Path = path,
+                    Name = Path.GetFileName(path),
+                    Normalized = NormalizeFolderName(Path.GetFileName(path))
+                })
+                .ToList();
+
+        Console.WriteLine(
+            $"[CONFIG][MES] Buscando carpeta para {month2} {monthName} dentro de \"{closuresRoot}\"");
+
+        foreach (var c in candidates)
+            Console.WriteLine($"[CONFIG][MES][CANDIDATE] \"{c.Name}\"");
+
+        var exact =
+            candidates.FirstOrDefault(c =>
+                string.Equals(
+                    c.Normalized,
+                    monthName,
+                    StringComparison.OrdinalIgnoreCase));
+
+        if (exact is not null)
+            return exact.Path;
+
+        var numberAndName =
+            candidates.FirstOrDefault(c =>
+                ContainsMonthNumberToken(c.Normalized, month2) &&
+                c.Normalized.Contains(
+                    monthName,
+                    StringComparison.OrdinalIgnoreCase));
+
+        if (numberAndName is not null)
+            return numberAndName.Path;
+
+        var byName =
+            candidates.Where(c =>
+                c.Normalized.Contains(
+                    monthName,
+                    StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+        if (byName.Count == 1)
+            return byName[0].Path;
+
+        var byNumber =
+            candidates.Where(c =>
+                ContainsMonthNumberToken(c.Normalized, month2))
+                .ToList();
+
+        if (byNumber.Count == 1)
+            return byNumber[0].Path;
+
+        throw new DirectoryNotFoundException(
+            $"No se pudo identificar de forma segura la carpeta del mes " +
+            $"{month2} {monthName} dentro de {closuresRoot}. " +
+            "No se creará una carpeta automáticamente.");
+    }
+
+    private static bool ContainsMonthNumberToken(
+        string text,
+        string month2)
+    {
+        var tokens =
+            text.Split(
+                new[] { ' ', '-', '_', '.', '(', ')', '[', ']' },
+                StringSplitOptions.RemoveEmptyEntries);
+
+        var month1 =
+            int.Parse(month2).ToString();
+
+        return tokens.Any(token =>
+            string.Equals(token, month2, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(token, month1, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string NormalizeFolderName(
+        string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return "";
+
+        var normalized =
+            value.Normalize(
+                NormalizationForm.FormD);
+
+        var sb =
+            new StringBuilder();
+
+        foreach (var ch in normalized)
+        {
+            var category =
+                System.Globalization.CharUnicodeInfo.GetUnicodeCategory(ch);
+
+            if (category !=
+                System.Globalization.UnicodeCategory.NonSpacingMark)
+            {
+                sb.Append(
+                    char.ToUpperInvariant(ch));
+            }
+        }
+
+        return sb
+            .ToString()
+            .Normalize(
+                NormalizationForm.FormC)
+            .Trim();
+    }
+
+    private static void SendUnicodeText(
+        string text)
+    {
+        foreach (var ch in text)
+        {
+            var down =
+                new NativeMethods.INPUT
+                {
+                    type =
+                        NativeMethods.INPUT_KEYBOARD,
+
+                    Data =
+                        new NativeMethods.INPUTUNION
+                        {
+                            ki =
+                                new NativeMethods.KEYBDINPUT
+                                {
+                                    wVk = 0,
+                                    wScan = ch,
+                                    dwFlags = 0x0004 // KEYEVENTF_UNICODE
+                                }
+                        }
+                };
+
+            var up =
+                new NativeMethods.INPUT
+                {
+                    type =
+                        NativeMethods.INPUT_KEYBOARD,
+
+                    Data =
+                        new NativeMethods.INPUTUNION
+                        {
+                            ki =
+                                new NativeMethods.KEYBDINPUT
+                                {
+                                    wVk = 0,
+                                    wScan = ch,
+                                    dwFlags = 0x0004 | 0x0002 // UNICODE | KEYUP
+                                }
+                        }
+                };
+
+            Send(
+            [
+                down,
+                up
+            ]);
+        }
     }
 
     private sealed class SimpleWindowSnapshot
