@@ -42,7 +42,7 @@ public sealed class WorkflowRunner
     {
         Console.WriteLine();
         Console.WriteLine(
-            "=== CIERRES V6.18.58A - BARRIDO USUARIOS CON CIERRE ===");
+            "=== CIERRES V6.18.61A - TODOS LOS CIERRES + IDEMPOTENCIA ===");
 
         var steps =
             workflow.Steps
@@ -140,6 +140,7 @@ public sealed class WorkflowRunner
         // expone el selector como ComboBox/Combo clásico y si podemos leer
         // sus elementos de forma determinista.
         await RunControlledExcelExecuteDiagnosticAsync(
+            workflow.TargetProcessName,
             userAnchor,
             reportOpenStep,
             reportLaserStep,
@@ -147,9 +148,9 @@ public sealed class WorkflowRunner
 
         Console.WriteLine();
         Console.WriteLine(
-            "[V6.18] Diagnóstico terminado. NO se ejecutaron cierres.");
+            "[V6.18.61A] Proceso de cierres terminado.");
         Console.WriteLine(
-            "[V6.18] Revisa [SCAN][RESULT], [SCAN][CON-CIERRE] y [SAVE-AS][READY].");
+            "[V6.18.61A] Revisa [EXPORT][OK], [EXPORT][SKIP-EXISTING] y [RESUMEN].");
 
         // Diagnóstico activo por defecto. Al ser una decisión de runtime,
         // el compilador no marca el código productivo posterior como inaccesible.
@@ -1966,6 +1967,7 @@ public sealed class WorkflowRunner
     }
 
     private static async Task RunControlledExcelExecuteDiagnosticAsync(
+        string processName,
         WorkflowStep userAnchor,
         WorkflowStep reportOpenStep,
         WorkflowStep reportLaserStep,
@@ -1973,7 +1975,7 @@ public sealed class WorkflowRunner
     {
         Console.WriteLine();
         Console.WriteLine(
-            "=== USER CLOSURE SCAN V6.18.58A ===");
+            "=== USER CLOSURE SCAN + EXPORT ALL V6.18.61A ===");
 
         var userSelection =
             await GetUserAnchorAsync(
@@ -2152,130 +2154,7 @@ public sealed class WorkflowRunner
         }
 
         // ------------------------------------------------------------
-        // 4. Para esta versión, validar Guardar como SOLO con el primer
-        //    usuario que realmente tenga cierre.
-        // ------------------------------------------------------------
-        var targetUser =
-            usersWithClosure[0];
-
-        Console.WriteLine();
-        Console.WriteLine(
-            $"[SCAN][TEST-SAVE-AS] Primer usuario con cierre={targetUser}");
-
-        var selectedTarget =
-            await SelectAccessibleUserByNameAsync(
-                userX,
-                userY,
-                targetUser,
-                orderedUsers,
-                cancellationToken);
-
-        if (!selectedTarget)
-        {
-            throw new InvalidOperationException(
-                $"No se pudo volver a seleccionar {targetUser}.");
-        }
-
-        await Task.Delay(
-            250,
-            cancellationToken);
-
-        var excel =
-            FindAccessibleControlByName(
-                "Excel",
-                305,
-                245,
-                719,
-                518);
-
-        var ejecutar =
-            FindAccessibleControlByName(
-                "Ejecutar",
-                305,
-                245,
-                719,
-                518);
-
-        if (excel is null)
-            throw new InvalidOperationException(
-                "No se encontró el destino Excel.");
-
-        if (ejecutar is null)
-            throw new InvalidOperationException(
-                "No se encontró el botón Ejecutar.");
-
-        var excelX =
-            excel.Left +
-            excel.Width / 2;
-
-        var excelY =
-            excel.Top +
-            excel.Height / 2;
-
-        NativeMethods.SetCursorPos(
-            excelX,
-            excelY);
-
-        Click();
-
-        await Task.Delay(
-            500,
-            cancellationToken);
-
-        var beforeWindows =
-            CaptureTopLevelWindowsSimple();
-
-        var executeX =
-            ejecutar.Left +
-            ejecutar.Width / 2;
-
-        var executeY =
-            ejecutar.Top +
-            ejecutar.Height / 2;
-
-        NativeMethods.SetCursorPos(
-            executeX,
-            executeY);
-
-        Click();
-
-        Console.WriteLine(
-            "[CIERRE][EJECUTAR] Click enviado. Esperando Guardar como...");
-
-        await Task.Delay(
-            2200,
-            cancellationToken);
-
-        var afterWindows =
-            CaptureTopLevelWindowsSimple();
-
-        var saveAs =
-            afterWindows.FirstOrDefault(
-                w =>
-                    !beforeWindows.Any(
-                        b => b.Handle == w.Handle) &&
-                    string.Equals(
-                        w.ClassName,
-                        "#32770",
-                        StringComparison.OrdinalIgnoreCase) &&
-                    w.Title.Contains(
-                        "Guardar",
-                        StringComparison.OrdinalIgnoreCase));
-
-        if (saveAs is null)
-        {
-            Console.WriteLine(
-                "[CIERRE][STOP] No apareció Guardar como.");
-
-            return;
-        }
-
-        Console.WriteLine(
-            $"[CIERRE][SAVE-AS] HWND=0x{saveAs.Handle.ToInt64():X}; " +
-            $"Title=\"{saveAs.Title}\"");
-
-        // ------------------------------------------------------------
-        // 5. Leer ruta configurada y resolver carpeta del mes de AYER.
+        // 4. Preparar destino una sola vez para todos los cierres.
         // ------------------------------------------------------------
         var configPath =
             FindAgentAppSettingsPath();
@@ -2292,100 +2171,368 @@ public sealed class WorkflowRunner
                 closuresRoot,
                 reportDate);
 
-        var safeUserName =
-            MakeSafeFilePart(
-                targetUser);
-
-        var outputFileName =
-            $"{reportDate:yyyy-MM-dd}_{safeUserName}_T01.xlsx";
-
-        var expectedFullPath =
-            Path.Combine(
-                monthFolder,
-                outputFileName);
+        Console.WriteLine();
+        Console.WriteLine(
+            $"[EXPORT][DESTINO] Fecha={reportDate:dd/MM/yyyy}");
 
         Console.WriteLine(
-            $"[CONFIG][MES] Fecha={reportDate:dd/MM/yyyy}; Carpeta=\"{monthFolder}\"");
+            $"[EXPORT][DESTINO] Carpeta=\"{monthFolder}\"");
 
-        Console.WriteLine(
-            $"[SAVE-AS][TARGET] \"{expectedFullPath}\"");
+        var exported =
+            0;
 
-        NativeMethods.SetForegroundWindow(
-            saveAs.Handle);
+        var skippedExisting =
+            0;
 
-        await Task.Delay(
-            250,
-            cancellationToken);
+        // ------------------------------------------------------------
+        // 5. Procesar TODOS los usuarios que sí tienen cierre.
+        // ------------------------------------------------------------
+        for (var closureIndex = 0;
+             closureIndex < usersWithClosure.Count;
+             closureIndex++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
 
-        SendKey(
-            0x4C, // Ctrl+L
-            true,
-            false,
-            false);
+            var targetUser =
+                usersWithClosure[
+                    closureIndex];
 
-        await Task.Delay(
-            120,
-            cancellationToken);
+            var safeUserName =
+                MakeSafeFilePart(
+                    targetUser);
 
-        SendUnicodeText(
-            monthFolder);
+            var outputFileName =
+                $"{reportDate:yyyy-MM-dd}_{safeUserName}_T01.xlsx";
 
-        await Task.Delay(
-            120,
-            cancellationToken);
+            var expectedFullPath =
+                Path.Combine(
+                    monthFolder,
+                    outputFileName);
 
-        SendKey(
-            0x0D,
-            false,
-            false,
-            false);
+            Console.WriteLine();
+            Console.WriteLine(
+                $"=== EXPORT {closureIndex + 1}/{usersWithClosure.Count}: {targetUser} ===");
 
-        await Task.Delay(
-            700,
-            cancellationToken);
+            Console.WriteLine(
+                $"[EXPORT][TARGET] \"{expectedFullPath}\"");
 
-        SendKey(
-            0x4E, // Alt+N
-            false,
-            false,
-            true);
+            // Idempotencia: si ya existe un archivo válido, no se vuelve
+            // a ejecutar el reporte ni se sobrescribe.
+            if (File.Exists(
+                    expectedFullPath))
+            {
+                var existing =
+                    new FileInfo(
+                        expectedFullPath);
 
-        await Task.Delay(
-            150,
-            cancellationToken);
+                if (existing.Length > 0)
+                {
+                    skippedExisting++;
 
-        SendKey(
-            0x41, // Ctrl+A
-            true,
-            false,
-            false);
+                    Console.WriteLine(
+                        $"[EXPORT][SKIP-EXISTING] Usuario={targetUser}; Bytes={existing.Length}");
 
-        await Task.Delay(
-            80,
-            cancellationToken);
+                    continue;
+                }
+            }
 
-        SendUnicodeText(
-            outputFileName);
+            // Excel puede quedar al frente después del guardado anterior.
+            // Recuperamos explícitamente SoftRestaurant antes de tocar Usuario.
+            var softRestaurantMain =
+                WindowInfo.FindWindowByProcessAndTitle(
+                    processName,
+                    "SOFT RESTAURANT");
 
-        await Task.Delay(
-            350,
-            cancellationToken);
+            if (softRestaurantMain == IntPtr.Zero)
+            {
+                throw new InvalidOperationException(
+                    "No se encontró la ventana principal de SoftRestaurant antes de exportar.");
+            }
+
+            NativeMethods.SetForegroundWindow(
+                softRestaurantMain);
+
+            await Task.Delay(
+                500,
+                cancellationToken);
+
+            var selectedTarget =
+                await SelectAccessibleUserByNameAsync(
+                    userX,
+                    userY,
+                    targetUser,
+                    orderedUsers,
+                    cancellationToken);
+
+            if (!selectedTarget)
+            {
+                throw new InvalidOperationException(
+                    $"No se pudo seleccionar {targetUser} para exportar.");
+            }
+
+            await Task.Delay(
+                250,
+                cancellationToken);
+
+            var excel =
+                FindAccessibleControlByName(
+                    "Excel",
+                    305,
+                    245,
+                    719,
+                    518);
+
+            var ejecutar =
+                FindAccessibleControlByName(
+                    "Ejecutar",
+                    305,
+                    245,
+                    719,
+                    518);
+
+            if (excel is null)
+                throw new InvalidOperationException(
+                    $"No se encontró Excel para {targetUser}.");
+
+            if (ejecutar is null)
+                throw new InvalidOperationException(
+                    $"No se encontró Ejecutar para {targetUser}.");
+
+            NativeMethods.SetCursorPos(
+                excel.Left + excel.Width / 2,
+                excel.Top + excel.Height / 2);
+
+            Click();
+
+            await Task.Delay(
+                400,
+                cancellationToken);
+
+            var beforeWindows =
+                CaptureTopLevelWindowsSimple();
+
+            NativeMethods.SetCursorPos(
+                ejecutar.Left + ejecutar.Width / 2,
+                ejecutar.Top + ejecutar.Height / 2);
+
+            Click();
+
+            Console.WriteLine(
+                $"[EXPORT][EJECUTAR] Usuario={targetUser}; esperando Guardar como...");
+
+            SimpleWindowSnapshot? saveAs =
+                null;
+
+            for (var wait = 0;
+                 wait < 40;
+                 wait++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var windows =
+                    CaptureTopLevelWindowsSimple();
+
+                saveAs =
+                    windows.FirstOrDefault(
+                        w =>
+                            string.Equals(
+                                w.ClassName,
+                                "#32770",
+                                StringComparison.OrdinalIgnoreCase) &&
+                            w.Title.Contains(
+                                "Guardar",
+                                StringComparison.OrdinalIgnoreCase) &&
+                            !beforeWindows.Any(
+                                b => b.Handle == w.Handle));
+
+                if (saveAs is not null)
+                    break;
+
+                await Task.Delay(
+                    250,
+                    cancellationToken);
+            }
+
+            if (saveAs is null)
+            {
+                throw new TimeoutException(
+                    $"No apareció Guardar como para {targetUser}.");
+            }
+
+            Console.WriteLine(
+                $"[EXPORT][SAVE-AS] Usuario={targetUser}; HWND=0x{saveAs.Handle.ToInt64():X}");
+
+            NativeMethods.SetForegroundWindow(
+                saveAs.Handle);
+
+            await Task.Delay(
+                200,
+                cancellationToken);
+
+            var saveControls =
+                EnumerateDescendantWindows(
+                    saveAs.Handle);
+
+            var fileNameEdit =
+                FindSaveAsFileNameEdit(
+                    saveAs.Handle,
+                    saveControls);
+
+            var saveButton =
+                FindSaveAsSaveButton(
+                    saveAs.Handle,
+                    saveControls);
+
+            if (fileNameEdit == IntPtr.Zero)
+                throw new InvalidOperationException(
+                    $"No se encontró Nombre de archivo para {targetUser}.");
+
+            if (saveButton == IntPtr.Zero)
+                throw new InvalidOperationException(
+                    $"No se encontró botón Guardar para {targetUser}.");
+
+            NativeMethods.SetFocus(
+                fileNameEdit);
+
+            await Task.Delay(
+                100,
+                cancellationToken);
+
+            SetWindowTextDirect(
+                fileNameEdit,
+                expectedFullPath);
+
+            await Task.Delay(
+                250,
+                cancellationToken);
+
+            var readBack =
+                GetWindowTextByMessage(
+                    fileNameEdit);
+
+            var verified =
+                string.Equals(
+                    readBack.Trim(),
+                    expectedFullPath,
+                    StringComparison.OrdinalIgnoreCase);
+
+            Console.WriteLine(
+                $"[EXPORT][VERIFY] Usuario={targetUser}; RutaCorrecta={verified}");
+
+            if (!verified)
+            {
+                throw new InvalidOperationException(
+                    $"Ruta no verificada para {targetUser}. Leído=\"{readBack}\"");
+            }
+
+            NativeMethods.SendMessage(
+                saveButton,
+                0x00F5, // BM_CLICK
+                IntPtr.Zero,
+                IntPtr.Zero);
+
+            var dialogClosed =
+                false;
+
+            for (var wait = 0;
+                 wait < 40;
+                 wait++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (!NativeMethods.IsWindowVisible(
+                        saveAs.Handle))
+                {
+                    dialogClosed =
+                        true;
+
+                    break;
+                }
+
+                await Task.Delay(
+                    200,
+                    cancellationToken);
+            }
+
+            Console.WriteLine(
+                $"[EXPORT][DIALOG-CLOSED] Usuario={targetUser}; Cerrado={dialogClosed}");
+
+            if (!dialogClosed)
+            {
+                throw new TimeoutException(
+                    $"Guardar como no cerró para {targetUser}.");
+            }
+
+            FileInfo? savedFile =
+                null;
+
+            for (var wait = 0;
+                 wait < 40;
+                 wait++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (File.Exists(
+                        expectedFullPath))
+                {
+                    var info =
+                        new FileInfo(
+                            expectedFullPath);
+
+                    if (info.Length > 0)
+                    {
+                        savedFile =
+                            info;
+
+                        break;
+                    }
+                }
+
+                await Task.Delay(
+                    250,
+                    cancellationToken);
+            }
+
+            if (savedFile is null)
+            {
+                throw new FileNotFoundException(
+                    $"No apareció el archivo guardado de {targetUser}.",
+                    expectedFullPath);
+            }
+
+            exported++;
+
+            Console.WriteLine(
+                $"[EXPORT][OK] Usuario={targetUser}; Bytes={savedFile.Length}; " +
+                $"Archivo=\"{savedFile.FullName}\"");
+
+            // Dar tiempo a Excel/SoftRestaurant a terminar su transición.
+            await Task.Delay(
+                700,
+                cancellationToken);
+        }
 
         Console.WriteLine();
         Console.WriteLine(
-            $"[SAVE-AS][READY] Usuario=\"{targetUser}\"");
+            "=== RESUMEN V6.18.61A ===");
 
         Console.WriteLine(
-            $"[SAVE-AS][READY] Ruta=\"{monthFolder}\"");
+            $"[RESUMEN] Usuarios={orderedUsers.Count}");
 
         Console.WriteLine(
-            $"[SAVE-AS][READY] Nombre=\"{outputFileName}\"");
+            $"[RESUMEN] ConCierre={usersWithClosure.Count}");
 
         Console.WriteLine(
-            "[V6.18.58A] Barrido completo realizado.");
+            $"[RESUMEN] Exportados={exported}");
 
         Console.WriteLine(
-            "[V6.18.58A] NO se pulsó Guardar/Save.");
+            $"[RESUMEN] YaExistian={skippedExisting}");
+
+        Console.WriteLine(
+            $"[RESUMEN] Destino=\"{monthFolder}\"");
+
+        Console.WriteLine(
+            "[V6.18.61A][OK] Se procesaron todos los usuarios con cierre detectado.");
     }
 
     private static string MakeSafeFilePart(
@@ -2765,6 +2912,219 @@ public sealed class WorkflowRunner
             IntPtr.Zero);
 
         return result;
+    }
+
+    private sealed class ChildWindowInfo
+    {
+        public IntPtr Handle { get; init; }
+        public int ControlId { get; init; }
+        public string ClassName { get; init; } = "";
+        public string Text { get; init; } = "";
+        public bool Visible { get; init; }
+        public bool Enabled { get; init; }
+        public int Left { get; init; }
+        public int Top { get; init; }
+        public int Width { get; init; }
+        public int Height { get; init; }
+    }
+
+    private static List<ChildWindowInfo> EnumerateDescendantWindows(
+        IntPtr parent)
+    {
+        var result =
+            new List<ChildWindowInfo>();
+
+        NativeMethods.EnumChildWindows(
+            parent,
+            (hWnd, _) =>
+            {
+                NativeMethods.GetWindowRect(
+                    hWnd,
+                    out var rect);
+
+                result.Add(
+                    new ChildWindowInfo
+                    {
+                        Handle = hWnd,
+                        ControlId =
+                            NativeMethods.GetDlgCtrlID(
+                                hWnd),
+                        ClassName =
+                            GetClassName(
+                                hWnd),
+                        Text =
+                            GetWindowText(
+                                hWnd)
+                            .Trim(),
+                        Visible =
+                            NativeMethods.IsWindowVisible(
+                                hWnd),
+                        Enabled =
+                            NativeMethods.IsWindowEnabled(
+                                hWnd),
+                        Left = rect.Left,
+                        Top = rect.Top,
+                        Width =
+                            rect.Right -
+                            rect.Left,
+                        Height =
+                            rect.Bottom -
+                            rect.Top
+                    });
+
+                return true;
+            },
+            IntPtr.Zero);
+
+        return result;
+    }
+
+    private static IntPtr FindSaveAsFileNameEdit(
+        IntPtr dialog,
+        IReadOnlyList<ChildWindowInfo> controls)
+    {
+        const int Edt1 =
+            0x0480;
+
+        var byId =
+            controls.FirstOrDefault(
+                x =>
+                    x.ControlId == Edt1 &&
+                    string.Equals(
+                        x.ClassName,
+                        "Edit",
+                        StringComparison.OrdinalIgnoreCase));
+
+        if (byId is not null)
+            return byId.Handle;
+
+        NativeMethods.GetWindowRect(
+            dialog,
+            out var dialogRect);
+
+        var candidates =
+            controls
+                .Where(
+                    x =>
+                        x.Visible &&
+                        x.Enabled &&
+                        string.Equals(
+                            x.ClassName,
+                            "Edit",
+                            StringComparison.OrdinalIgnoreCase) &&
+                        x.Top >
+                            dialogRect.Top +
+                            (dialogRect.Bottom - dialogRect.Top) / 2)
+                .OrderByDescending(
+                    x => x.Top)
+                .ThenByDescending(
+                    x => x.Width)
+                .ToList();
+
+        return candidates.Count > 0
+            ? candidates[0].Handle
+            : IntPtr.Zero;
+    }
+
+    private static IntPtr FindSaveAsSaveButton(
+        IntPtr dialog,
+        IReadOnlyList<ChildWindowInfo> controls)
+    {
+        var byId =
+            controls.FirstOrDefault(
+                x =>
+                    x.ControlId == 1 &&
+                    string.Equals(
+                        x.ClassName,
+                        "Button",
+                        StringComparison.OrdinalIgnoreCase));
+
+        if (byId is not null)
+            return byId.Handle;
+
+        var byText =
+            controls.FirstOrDefault(
+                x =>
+                    x.Visible &&
+                    x.Enabled &&
+                    string.Equals(
+                        x.ClassName,
+                        "Button",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    x.Text.Contains(
+                        "Guardar",
+                        StringComparison.OrdinalIgnoreCase));
+
+        return byText?.Handle ??
+               IntPtr.Zero;
+    }
+
+    private static string GetWindowTextByMessage(
+        IntPtr hWnd)
+    {
+        if (hWnd == IntPtr.Zero)
+            return "";
+
+        const int WM_GETTEXTLENGTH =
+            0x000E;
+
+        const int WM_GETTEXT =
+            0x000D;
+
+        var length =
+            NativeMethods.SendMessage(
+                hWnd,
+                WM_GETTEXTLENGTH,
+                IntPtr.Zero,
+                IntPtr.Zero)
+            .ToInt32();
+
+        var capacity =
+            Math.Max(
+                length + 2,
+                1024);
+
+        var buffer =
+            new StringBuilder(
+                capacity);
+
+        var chars =
+            SendMessageTextBuffer(
+                hWnd,
+                WM_GETTEXT,
+                new IntPtr(capacity),
+                buffer)
+            .ToInt32();
+
+        return chars > 0
+            ? buffer.ToString()
+            : "";
+    }
+
+    [DllImport(
+        "user32.dll",
+        CharSet = CharSet.Unicode,
+        EntryPoint = "SendMessageW")]
+    private static extern IntPtr SendMessageTextBuffer(
+        IntPtr hWnd,
+        int msg,
+        IntPtr wParam,
+        StringBuilder lParam);
+
+    private static void SetWindowTextDirect(
+        IntPtr hWnd,
+        string value)
+    {
+        if (hWnd == IntPtr.Zero)
+            throw new ArgumentException(
+                "HWND inválido.",
+                nameof(hWnd));
+
+        NativeMethods.SendMessage(
+            hWnd,
+            0x000C, // WM_SETTEXT
+            IntPtr.Zero,
+            value);
     }
 
     private static async Task<bool> SelectAccessibleUserDirectAsync(
