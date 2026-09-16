@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Diagnostics;
 
 namespace ParrillitaIA.Trainer;
 
@@ -42,7 +43,7 @@ public sealed class WorkflowRunner
     {
         Console.WriteLine();
         Console.WriteLine(
-            "=== CIERRES V6.18.61A - TODOS LOS CIERRES + IDEMPOTENCIA ===");
+            "=== CIERRES V6.18.80 - BARRIDO COMPLETO OPTIMIZADO ===");
 
         var steps =
             workflow.Steps
@@ -139,6 +140,9 @@ public sealed class WorkflowRunner
         // No ejecuta cierres todavía. Primero comprobamos si SoftRestaurant
         // expone el selector como ComboBox/Combo clásico y si podemos leer
         // sus elementos de forma determinista.
+        var closuresFlowWatch =
+            Stopwatch.StartNew();
+
         await RunControlledExcelExecuteDiagnosticAsync(
             workflow.TargetProcessName,
             userAnchor,
@@ -147,10 +151,16 @@ public sealed class WorkflowRunner
             cancellationToken);
 
         Console.WriteLine();
+        closuresFlowWatch.Stop();
+
         Console.WriteLine(
-            "[V6.18.61A] Proceso de cierres terminado.");
+            $"[TIMING][CIERRES-FLOW] Total={closuresFlowWatch.Elapsed} " +
+            $"TotalMs={closuresFlowWatch.ElapsedMilliseconds}");
+
         Console.WriteLine(
-            "[V6.18.61A] Revisa [EXPORT][OK], [EXPORT][SKIP-EXISTING] y [RESUMEN].");
+            "[V6.18.80] Proceso de cierres terminado.");
+        Console.WriteLine(
+            "[V6.18.80] Revisa [PERF], [TIMING][USER], [TIMING][SCAN], [TIMING][CIERRES-FLOW], [EXPORT] y [RESUMEN].");
 
         // Diagnóstico activo por defecto. Al ser una decisión de runtime,
         // el compilador no marca el código productivo posterior como inaccesible.
@@ -1974,8 +1984,9 @@ public sealed class WorkflowRunner
         CancellationToken cancellationToken)
     {
         Console.WriteLine();
+
         Console.WriteLine(
-            "=== USER CLOSURE SCAN + EXPORT ALL V6.18.61A ===");
+            "=== USER CLOSURE SEQUENTIAL FULL SCAN V6.18.80 + TIMING ===");
 
         var userSelection =
             await GetUserAnchorAsync(
@@ -2056,85 +2067,339 @@ public sealed class WorkflowRunner
         var usersWithClosure =
             new List<string>();
 
-        // ------------------------------------------------------------
-        // 3. Recorrer TODOS los usuarios y detectar 0 vs >=1 turno.
-        // ------------------------------------------------------------
-        for (var i = 0;
-             i < orderedUsers.Count;
-             i++)
+        var reportDate =
+            DateTime.Today.AddDays(-1);
+
+        var priorityHistory =
+            LoadSanPedroClosureHistory();
+
+        // PRODUCCION V6.18.78:
+        // El historial ya NO limita quién se revisa.
+        // Todos los usuarios se recorren diariamente en el mismo orden
+        // físico de la lista para evitar viajes arriba/abajo.
+        var scanUsers =
+            orderedUsers.ToList();
+
+        Console.WriteLine();
+        Console.WriteLine(
+            $"[PRIORITY] Historial SAN_PEDRO: usuarios={priorityHistory.Count}");
+
+        Console.WriteLine(
+            $"[SCAN][MODE] COMPLETO_SECUENCIAL_DIARIO; " +
+            $"FechaReporte={reportDate:dd/MM/yyyy}; " +
+            $"Usuarios={scanUsers.Count}/{orderedUsers.Count}");
+
+        Console.WriteLine(
+            "[SCAN][SEQUENTIAL] Orden físico: " +
+            $"{scanUsers.First()} -> ... -> {scanUsers.Last()}");
+
+        Console.WriteLine(
+            "[SCAN][SEQUENTIAL] Se revisan los 46 diariamente; " +
+            "solo se detiene antes si alcanza 3 cierres confirmados.");
+
+        var usersReviewed =
+            0;
+
+        var inconclusiveUsers =
+            new List<string>();
+
+        var visualCursor =
+            new UserVisualCursorState();
+
+        // V6.18.80: txtprecorte es el mismo control físico durante todo
+        // el barrido. Resolverlo una sola vez evita repetir la búsqueda
+        // MSAA costosa por cada usuario.
+        var cachedTurnInfo =
+            TryReadAccessibleProbeAtPoint(
+                400,
+                416);
+
+        if (cachedTurnInfo is null ||
+            !string.Equals(
+                cachedTurnInfo.Name.Trim(),
+                "txtprecorte",
+                StringComparison.OrdinalIgnoreCase))
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            Console.WriteLine(
+                "[PERF][TXTPRECORTE] Probe directo no coincidió; usando búsqueda completa una sola vez.");
 
-            var user =
-                orderedUsers[i];
-
-            if (i > 0)
-            {
-                var selected =
-                    await SelectAccessibleUserByNameAsync(
-                        userX,
-                        userY,
-                        user,
-                        orderedUsers,
-                        cancellationToken);
-
-                if (!selected)
-                {
-                    Console.WriteLine(
-                        $"[SCAN][{i + 1:00}/{orderedUsers.Count:00}] " +
-                        $"{user}: ERROR_SELECCION");
-
-                    continue;
-                }
-            }
-
-            await Task.Delay(
-                180,
-                cancellationToken);
-
-            var turnInfo =
+            cachedTurnInfo =
                 FindAccessibleControlByName(
                     "txtprecorte",
                     305,
                     245,
                     719,
                     518);
+        }
 
-            if (turnInfo is null)
+        if (cachedTurnInfo is null)
+        {
+            throw new InvalidOperationException(
+                "No se pudo localizar txtprecorte antes del barrido.");
+        }
+
+        Console.WriteLine(
+            $"[PERF][TXTPRECORTE] Cacheado Bounds=({cachedTurnInfo.Left},{cachedTurnInfo.Top}," +
+            $"{cachedTurnInfo.Width},{cachedTurnInfo.Height})");
+
+        var scanWatch =
+            Stopwatch.StartNew();
+
+        // ------------------------------------------------------------
+        // 3. Barrido diario completo EN ORDEN FÍSICO.
+        //    Cada usuario debe quedar CONCLUYENTE antes de contarse.
+        //    Intento 1 usa navegación visual incremental.
+        //    Intentos 2-3 usan la selección estable original.
+        // ------------------------------------------------------------
+        for (var i = 0;
+             i < scanUsers.Count;
+             i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var user =
+                scanUsers[i];
+
+            var userWatch =
+                Stopwatch.StartNew();
+
+            long selectionMs = 0;
+            long readbackMs = 0;
+            long controlLookupMs = 0;
+            long signalMs = 0;
+
+            var userConclusive =
+                false;
+
+            var hasTurn =
+                false;
+
+            var darkPixels =
+                0;
+
+            var sampledPixels =
+                0;
+
+            StableTurnSignal stableTurn =
+                default;
+
+            for (var attempt = 1;
+                 attempt <= 3;
+                 attempt++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 Console.WriteLine(
-                    $"[SCAN][{i + 1:00}/{orderedUsers.Count:00}] " +
-                    $"{user}: txtprecorte NO encontrado");
+                    $"[SCAN][TRY] Usuario={user}; Intento={attempt}/3");
+
+                bool selected;
+
+                var selectionWatch =
+                    Stopwatch.StartNew();
+
+                if (attempt == 1)
+                {
+                    selected =
+                        await SelectAccessibleUserByNameOptimizedAsync(
+                            userX,
+                            userY,
+                            user,
+                            orderedUsers,
+                            visualCursor,
+                            cancellationToken);
+                }
+                else
+                {
+                    selected =
+                        await SelectAccessibleUserByNameAsync(
+                            userX,
+                            userY,
+                            user,
+                            orderedUsers,
+                            cancellationToken);
+                }
+
+                selectionWatch.Stop();
+                selectionMs += selectionWatch.ElapsedMilliseconds;
+
+                if (!selected)
+                {
+                    Console.WriteLine(
+                        $"[SCAN][RETRY] Usuario={user}; Motivo=ERROR_SELECCION");
+
+                    await Task.Delay(
+                        180,
+                        cancellationToken);
+
+                    continue;
+                }
+
+                var readbackWatch =
+                    Stopwatch.StartNew();
+
+                var selectedValueOk =
+                    await WaitForSelectedUserValueAsync(
+                        userX,
+                        userY,
+                        user,
+                        cancellationToken);
+
+                readbackWatch.Stop();
+                readbackMs += readbackWatch.ElapsedMilliseconds;
+
+                if (!selectedValueOk)
+                {
+                    Console.WriteLine(
+                        $"[SCAN][RETRY] Usuario={user}; Motivo=ERROR_READBACK_USUARIO");
+
+                    await Task.Delay(
+                        220,
+                        cancellationToken);
+
+                    continue;
+                }
+
+                var controlLookupWatch =
+                    Stopwatch.StartNew();
+
+                // Reutilizar el control ya localizado antes del loop.
+                var turnInfo =
+                    cachedTurnInfo;
+
+                controlLookupWatch.Stop();
+                controlLookupMs += controlLookupWatch.ElapsedMilliseconds;
+
+                var signalWatch =
+                    Stopwatch.StartNew();
+
+                stableTurn =
+                    await ReadStableTurnSignalAsync(
+                        turnInfo.Left,
+                        turnInfo.Top,
+                        turnInfo.Width,
+                        turnInfo.Height,
+                        cancellationToken);
+
+                signalWatch.Stop();
+                signalMs += signalWatch.ElapsedMilliseconds;
+
+                if (!stableTurn.IsStable)
+                {
+                    Console.WriteLine(
+                        $"[SCAN][RETRY] Usuario={user}; Motivo=SENAL_INESTABLE");
+
+                    await Task.Delay(
+                        220,
+                        cancellationToken);
+
+                    continue;
+                }
+
+                hasTurn =
+                    stableTurn.HasClosure;
+
+                darkPixels =
+                    stableTurn.DarkPixels;
+
+                sampledPixels =
+                    stableTurn.SampledPixels;
+
+                userConclusive =
+                    true;
+
+                break;
+            }
+
+            if (!userConclusive)
+            {
+                inconclusiveUsers.Add(
+                    user);
+
+                userWatch.Stop();
+
+                Console.WriteLine(
+                    $"[SCAN][{i + 1:00}/{scanUsers.Count:00}] " +
+                    $"{user}: INCONCLUSO tras 3 intentos");
+
+                Console.WriteLine(
+                    $"[TIMING][USER] {user,-16} " +
+                    $"Total={userWatch.ElapsedMilliseconds}ms " +
+                    $"Select={selectionMs}ms " +
+                    $"Readback={readbackMs}ms " +
+                    $"Control={controlLookupMs}ms " +
+                    $"Signal={signalMs}ms " +
+                    $"Resultado=INCONCLUSO");
 
                 continue;
             }
 
-            var hasTurn =
-                HasVisibleTurnData(
-                    turnInfo.Left,
-                    turnInfo.Top,
-                    turnInfo.Width,
-                    turnInfo.Height,
-                    out var darkPixels,
-                    out var sampledPixels);
+            usersReviewed++;
+
+            userWatch.Stop();
 
             Console.WriteLine(
-                $"[SCAN][{i + 1:00}/{orderedUsers.Count:00}] " +
+                $"[SCAN][{i + 1:00}/{scanUsers.Count:00}] " +
                 $"{user,-16} Ink={darkPixels}/{sampledPixels} " +
+                $"Stable={stableTurn.IsStable} Samples={stableTurn.Samples} " +
                 $"Cierre={(hasTurn ? "SI" : "NO")}");
+
+            Console.WriteLine(
+                $"[TIMING][USER] {user,-16} " +
+                $"Total={userWatch.ElapsedMilliseconds}ms " +
+                $"Select={selectionMs}ms " +
+                $"Readback={readbackMs}ms " +
+                $"Control={controlLookupMs}ms " +
+                $"Signal={signalMs}ms " +
+                $"Resultado={(hasTurn ? "CIERRE" : "NO_CIERRE")}");
 
             if (hasTurn)
             {
                 usersWithClosure.Add(
                     user);
+
+                if (usersWithClosure.Count >= 3)
+                {
+                    Console.WriteLine(
+                        "[SCAN][MAX] Se encontraron 3 cierres. " +
+                        "Se detiene el barrido porque se alcanzó el máximo operativo.");
+
+                    break;
+                }
             }
         }
 
+        scanWatch.Stop();
+
         Console.WriteLine();
         Console.WriteLine(
-            $"[SCAN][RESULT] Usuarios={orderedUsers.Count}; " +
+            $"[TIMING][SCAN] Total={scanWatch.Elapsed} " +
+            $"TotalMs={scanWatch.ElapsedMilliseconds}");
+
+        Console.WriteLine(
+            $"[SCAN][RESULT] Modo=FULL_SEQUENTIAL; " +
+            $"Concluyentes={usersReviewed}; " +
+            $"Planificados={scanUsers.Count}; " +
+            $"TotalUsuarios={orderedUsers.Count}; " +
+            $"Inconclusos={inconclusiveUsers.Count}; " +
             $"ConCierre={usersWithClosure.Count}; " +
-            $"SinCierre={orderedUsers.Count - usersWithClosure.Count}");
+            $"MaxOperativo=3");
+
+        if (usersWithClosure.Count < 3 &&
+            usersReviewed == scanUsers.Count &&
+            inconclusiveUsers.Count == 0)
+        {
+            Console.WriteLine(
+                "[SCAN][COVERAGE][OK] Cobertura diaria completa: todos los usuarios fueron verificados.");
+        }
+
+        if (inconclusiveUsers.Count > 0)
+        {
+            Console.WriteLine(
+                "[SCAN][INCONCLUSOS] " +
+                string.Join(
+                    ", ",
+                    inconclusiveUsers));
+        }
 
         if (usersWithClosure.Count > 0)
         {
@@ -2143,6 +2408,20 @@ public sealed class WorkflowRunner
                 string.Join(
                     ", ",
                     usersWithClosure));
+        }
+
+        if (inconclusiveUsers.Count == 0 ||
+            usersWithClosure.Count >= 3)
+        {
+            UpdateSanPedroClosureHistory(
+                priorityHistory,
+                usersWithClosure,
+                reportDate);
+        }
+        else
+        {
+            Console.WriteLine(
+                "[PRIORITY][SKIP] No se actualiza historial porque hubo candidatos inconclusos.");
         }
 
         if (usersWithClosure.Count == 0)
@@ -2159,12 +2438,19 @@ public sealed class WorkflowRunner
         var configPath =
             FindAgentAppSettingsPath();
 
-        var closuresRoot =
+        var configuredClosuresRoot =
             ReadCashClosuresRootFromAgent(
                 configPath);
 
-        var reportDate =
-            DateTime.Today.AddDays(-1);
+        var closuresRoot =
+            ResolveExistingCashClosuresRoot(
+                configuredClosuresRoot);
+
+        Console.WriteLine(
+            $"[CONFIG][CIERRES] Configurada=\"{configuredClosuresRoot}\"");
+
+        Console.WriteLine(
+            $"[CONFIG][CIERRES] Resuelta=\"{closuresRoot}\"");
 
         var monthFolder =
             ResolveExistingMonthFolder(
@@ -2184,8 +2470,15 @@ public sealed class WorkflowRunner
         var skippedExisting =
             0;
 
+        var failed =
+            0;
+
+        var failedUsers =
+            new List<string>();
+
         // ------------------------------------------------------------
         // 5. Procesar TODOS los usuarios que sí tienen cierre.
+        //    Cada usuario queda aislado: un error no detiene los demás.
         // ------------------------------------------------------------
         for (var closureIndex = 0;
              closureIndex < usersWithClosure.Count;
@@ -2216,305 +2509,345 @@ public sealed class WorkflowRunner
             Console.WriteLine(
                 $"[EXPORT][TARGET] \"{expectedFullPath}\"");
 
-            // Idempotencia: si ya existe un archivo válido, no se vuelve
-            // a ejecutar el reporte ni se sobrescribe.
-            if (File.Exists(
-                    expectedFullPath))
+            try
             {
-                var existing =
-                    new FileInfo(
-                        expectedFullPath);
-
-                if (existing.Length > 0)
-                {
-                    skippedExisting++;
-
-                    Console.WriteLine(
-                        $"[EXPORT][SKIP-EXISTING] Usuario={targetUser}; Bytes={existing.Length}");
-
-                    continue;
-                }
-            }
-
-            // Excel puede quedar al frente después del guardado anterior.
-            // Recuperamos explícitamente SoftRestaurant antes de tocar Usuario.
-            var softRestaurantMain =
-                WindowInfo.FindWindowByProcessAndTitle(
-                    processName,
-                    "SOFT RESTAURANT");
-
-            if (softRestaurantMain == IntPtr.Zero)
-            {
-                throw new InvalidOperationException(
-                    "No se encontró la ventana principal de SoftRestaurant antes de exportar.");
-            }
-
-            NativeMethods.SetForegroundWindow(
-                softRestaurantMain);
-
-            await Task.Delay(
-                500,
-                cancellationToken);
-
-            var selectedTarget =
-                await SelectAccessibleUserByNameAsync(
-                    userX,
-                    userY,
-                    targetUser,
-                    orderedUsers,
-                    cancellationToken);
-
-            if (!selectedTarget)
-            {
-                throw new InvalidOperationException(
-                    $"No se pudo seleccionar {targetUser} para exportar.");
-            }
-
-            await Task.Delay(
-                250,
-                cancellationToken);
-
-            var excel =
-                FindAccessibleControlByName(
-                    "Excel",
-                    305,
-                    245,
-                    719,
-                    518);
-
-            var ejecutar =
-                FindAccessibleControlByName(
-                    "Ejecutar",
-                    305,
-                    245,
-                    719,
-                    518);
-
-            if (excel is null)
-                throw new InvalidOperationException(
-                    $"No se encontró Excel para {targetUser}.");
-
-            if (ejecutar is null)
-                throw new InvalidOperationException(
-                    $"No se encontró Ejecutar para {targetUser}.");
-
-            NativeMethods.SetCursorPos(
-                excel.Left + excel.Width / 2,
-                excel.Top + excel.Height / 2);
-
-            Click();
-
-            await Task.Delay(
-                400,
-                cancellationToken);
-
-            var beforeWindows =
-                CaptureTopLevelWindowsSimple();
-
-            NativeMethods.SetCursorPos(
-                ejecutar.Left + ejecutar.Width / 2,
-                ejecutar.Top + ejecutar.Height / 2);
-
-            Click();
-
-            Console.WriteLine(
-                $"[EXPORT][EJECUTAR] Usuario={targetUser}; esperando Guardar como...");
-
-            SimpleWindowSnapshot? saveAs =
-                null;
-
-            for (var wait = 0;
-                 wait < 40;
-                 wait++)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                var windows =
-                    CaptureTopLevelWindowsSimple();
-
-                saveAs =
-                    windows.FirstOrDefault(
-                        w =>
-                            string.Equals(
-                                w.ClassName,
-                                "#32770",
-                                StringComparison.OrdinalIgnoreCase) &&
-                            w.Title.Contains(
-                                "Guardar",
-                                StringComparison.OrdinalIgnoreCase) &&
-                            !beforeWindows.Any(
-                                b => b.Handle == w.Handle));
-
-                if (saveAs is not null)
-                    break;
-
-                await Task.Delay(
-                    250,
-                    cancellationToken);
-            }
-
-            if (saveAs is null)
-            {
-                throw new TimeoutException(
-                    $"No apareció Guardar como para {targetUser}.");
-            }
-
-            Console.WriteLine(
-                $"[EXPORT][SAVE-AS] Usuario={targetUser}; HWND=0x{saveAs.Handle.ToInt64():X}");
-
-            NativeMethods.SetForegroundWindow(
-                saveAs.Handle);
-
-            await Task.Delay(
-                200,
-                cancellationToken);
-
-            var saveControls =
-                EnumerateDescendantWindows(
-                    saveAs.Handle);
-
-            var fileNameEdit =
-                FindSaveAsFileNameEdit(
-                    saveAs.Handle,
-                    saveControls);
-
-            var saveButton =
-                FindSaveAsSaveButton(
-                    saveAs.Handle,
-                    saveControls);
-
-            if (fileNameEdit == IntPtr.Zero)
-                throw new InvalidOperationException(
-                    $"No se encontró Nombre de archivo para {targetUser}.");
-
-            if (saveButton == IntPtr.Zero)
-                throw new InvalidOperationException(
-                    $"No se encontró botón Guardar para {targetUser}.");
-
-            NativeMethods.SetFocus(
-                fileNameEdit);
-
-            await Task.Delay(
-                100,
-                cancellationToken);
-
-            SetWindowTextDirect(
-                fileNameEdit,
-                expectedFullPath);
-
-            await Task.Delay(
-                250,
-                cancellationToken);
-
-            var readBack =
-                GetWindowTextByMessage(
-                    fileNameEdit);
-
-            var verified =
-                string.Equals(
-                    readBack.Trim(),
-                    expectedFullPath,
-                    StringComparison.OrdinalIgnoreCase);
-
-            Console.WriteLine(
-                $"[EXPORT][VERIFY] Usuario={targetUser}; RutaCorrecta={verified}");
-
-            if (!verified)
-            {
-                throw new InvalidOperationException(
-                    $"Ruta no verificada para {targetUser}. Leído=\"{readBack}\"");
-            }
-
-            NativeMethods.SendMessage(
-                saveButton,
-                0x00F5, // BM_CLICK
-                IntPtr.Zero,
-                IntPtr.Zero);
-
-            var dialogClosed =
-                false;
-
-            for (var wait = 0;
-                 wait < 40;
-                 wait++)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                if (!NativeMethods.IsWindowVisible(
-                        saveAs.Handle))
-                {
-                    dialogClosed =
-                        true;
-
-                    break;
-                }
-
-                await Task.Delay(
-                    200,
-                    cancellationToken);
-            }
-
-            Console.WriteLine(
-                $"[EXPORT][DIALOG-CLOSED] Usuario={targetUser}; Cerrado={dialogClosed}");
-
-            if (!dialogClosed)
-            {
-                throw new TimeoutException(
-                    $"Guardar como no cerró para {targetUser}.");
-            }
-
-            FileInfo? savedFile =
-                null;
-
-            for (var wait = 0;
-                 wait < 40;
-                 wait++)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
+                // Idempotencia: si ya existe un archivo válido, no se vuelve
+                // a ejecutar el reporte ni se sobrescribe.
                 if (File.Exists(
                         expectedFullPath))
                 {
-                    var info =
+                    var existing =
                         new FileInfo(
                             expectedFullPath);
-
-                    if (info.Length > 0)
+    
+                    if (existing.Length > 0)
                     {
-                        savedFile =
-                            info;
-
-                        break;
+                        skippedExisting++;
+    
+                        Console.WriteLine(
+                            $"[EXPORT][SKIP-EXISTING] Usuario={targetUser}; Bytes={existing.Length}");
+    
+                        continue;
                     }
                 }
-
+    
+                // Excel puede quedar al frente después del guardado anterior.
+                // Recuperamos explícitamente SoftRestaurant antes de tocar Usuario.
+                var softRestaurantMain =
+                    WindowInfo.FindWindowByProcessAndTitle(
+                        processName,
+                        "SOFT RESTAURANT");
+    
+                if (softRestaurantMain == IntPtr.Zero)
+                {
+                    throw new InvalidOperationException(
+                        "No se encontró la ventana principal de SoftRestaurant antes de exportar.");
+                }
+    
+                NativeMethods.SetForegroundWindow(
+                    softRestaurantMain);
+    
+                await Task.Delay(
+                    500,
+                    cancellationToken);
+    
+                var selectedTarget =
+                    await SelectAccessibleUserByNameAsync(
+                        userX,
+                        userY,
+                        targetUser,
+                        orderedUsers,
+                        cancellationToken);
+    
+                if (!selectedTarget)
+                {
+                    throw new InvalidOperationException(
+                        $"No se pudo seleccionar {targetUser} para exportar.");
+                }
+    
                 await Task.Delay(
                     250,
                     cancellationToken);
-            }
-
-            if (savedFile is null)
-            {
-                throw new FileNotFoundException(
-                    $"No apareció el archivo guardado de {targetUser}.",
+    
+                var excel =
+                    FindAccessibleControlByName(
+                        "Excel",
+                        305,
+                        245,
+                        719,
+                        518);
+    
+                var ejecutar =
+                    FindAccessibleControlByName(
+                        "Ejecutar",
+                        305,
+                        245,
+                        719,
+                        518);
+    
+                if (excel is null)
+                    throw new InvalidOperationException(
+                        $"No se encontró Excel para {targetUser}.");
+    
+                if (ejecutar is null)
+                    throw new InvalidOperationException(
+                        $"No se encontró Ejecutar para {targetUser}.");
+    
+                NativeMethods.SetCursorPos(
+                    excel.Left + excel.Width / 2,
+                    excel.Top + excel.Height / 2);
+    
+                Click();
+    
+                await Task.Delay(
+                    400,
+                    cancellationToken);
+    
+                var beforeWindows =
+                    CaptureTopLevelWindowsSimple();
+    
+                NativeMethods.SetCursorPos(
+                    ejecutar.Left + ejecutar.Width / 2,
+                    ejecutar.Top + ejecutar.Height / 2);
+    
+                Click();
+    
+                Console.WriteLine(
+                    $"[EXPORT][EJECUTAR] Usuario={targetUser}; esperando Guardar como...");
+    
+                SimpleWindowSnapshot? saveAs =
+                    null;
+    
+                for (var wait = 0;
+                     wait < 40;
+                     wait++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+    
+                    var windows =
+                        CaptureTopLevelWindowsSimple();
+    
+                    saveAs =
+                        windows.FirstOrDefault(
+                            w =>
+                                string.Equals(
+                                    w.ClassName,
+                                    "#32770",
+                                    StringComparison.OrdinalIgnoreCase) &&
+                                w.Title.Contains(
+                                    "Guardar",
+                                    StringComparison.OrdinalIgnoreCase) &&
+                                !beforeWindows.Any(
+                                    b => b.Handle == w.Handle));
+    
+                    if (saveAs is not null)
+                        break;
+    
+                    await Task.Delay(
+                        250,
+                        cancellationToken);
+                }
+    
+                if (saveAs is null)
+                {
+                    throw new TimeoutException(
+                        $"No apareció Guardar como para {targetUser}.");
+                }
+    
+                Console.WriteLine(
+                    $"[EXPORT][SAVE-AS] Usuario={targetUser}; HWND=0x{saveAs.Handle.ToInt64():X}");
+    
+                NativeMethods.SetForegroundWindow(
+                    saveAs.Handle);
+    
+                await Task.Delay(
+                    200,
+                    cancellationToken);
+    
+                var saveControls =
+                    EnumerateDescendantWindows(
+                        saveAs.Handle);
+    
+                var fileNameEdit =
+                    FindSaveAsFileNameEdit(
+                        saveAs.Handle,
+                        saveControls);
+    
+                var saveButton =
+                    FindSaveAsSaveButton(
+                        saveAs.Handle,
+                        saveControls);
+    
+                if (fileNameEdit == IntPtr.Zero)
+                    throw new InvalidOperationException(
+                        $"No se encontró Nombre de archivo para {targetUser}.");
+    
+                if (saveButton == IntPtr.Zero)
+                    throw new InvalidOperationException(
+                        $"No se encontró botón Guardar para {targetUser}.");
+    
+                NativeMethods.SetFocus(
+                    fileNameEdit);
+    
+                await Task.Delay(
+                    100,
+                    cancellationToken);
+    
+                SetWindowTextDirect(
+                    fileNameEdit,
                     expectedFullPath);
+    
+                await Task.Delay(
+                    250,
+                    cancellationToken);
+    
+                var readBack =
+                    GetWindowTextByMessage(
+                        fileNameEdit);
+    
+                var verified =
+                    string.Equals(
+                        readBack.Trim(),
+                        expectedFullPath,
+                        StringComparison.OrdinalIgnoreCase);
+    
+                Console.WriteLine(
+                    $"[EXPORT][VERIFY] Usuario={targetUser}; RutaCorrecta={verified}");
+    
+                if (!verified)
+                {
+                    throw new InvalidOperationException(
+                        $"Ruta no verificada para {targetUser}. Leído=\"{readBack}\"");
+                }
+    
+                NativeMethods.SendMessage(
+                    saveButton,
+                    0x00F5, // BM_CLICK
+                    IntPtr.Zero,
+                    IntPtr.Zero);
+    
+                var dialogClosed =
+                    false;
+    
+                for (var wait = 0;
+                     wait < 40;
+                     wait++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+    
+                    if (!NativeMethods.IsWindowVisible(
+                            saveAs.Handle))
+                    {
+                        dialogClosed =
+                            true;
+    
+                        break;
+                    }
+    
+                    await Task.Delay(
+                        200,
+                        cancellationToken);
+                }
+    
+                Console.WriteLine(
+                    $"[EXPORT][DIALOG-CLOSED] Usuario={targetUser}; Cerrado={dialogClosed}");
+    
+                if (!dialogClosed)
+                {
+                    throw new TimeoutException(
+                        $"Guardar como no cerró para {targetUser}.");
+                }
+    
+                FileInfo? savedFile =
+                    null;
+    
+                for (var wait = 0;
+                     wait < 40;
+                     wait++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+    
+                    if (File.Exists(
+                            expectedFullPath))
+                    {
+                        var info =
+                            new FileInfo(
+                                expectedFullPath);
+    
+                        if (info.Length > 0)
+                        {
+                            savedFile =
+                                info;
+    
+                            break;
+                        }
+                    }
+    
+                    await Task.Delay(
+                        250,
+                        cancellationToken);
+                }
+    
+                if (savedFile is null)
+                {
+                    throw new FileNotFoundException(
+                        $"No apareció el archivo guardado de {targetUser}.",
+                        expectedFullPath);
+                }
+    
+                exported++;
+    
+                Console.WriteLine(
+                    $"[EXPORT][OK] Usuario={targetUser}; Bytes={savedFile.Length}; " +
+                    $"Archivo=\"{savedFile.FullName}\"");
+    
+                // Dar tiempo a Excel/SoftRestaurant a terminar su transición.
+                await Task.Delay(
+                    700,
+                    cancellationToken);
             }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                failed++;
 
-            exported++;
+                failedUsers.Add(
+                    targetUser);
 
-            Console.WriteLine(
-                $"[EXPORT][OK] Usuario={targetUser}; Bytes={savedFile.Length}; " +
-                $"Archivo=\"{savedFile.FullName}\"");
+                Console.WriteLine(
+                    $"[EXPORT][ERROR] Usuario={targetUser}; Tipo={ex.GetType().Name}; Mensaje={ex.Message}");
 
-            // Dar tiempo a Excel/SoftRestaurant a terminar su transición.
-            await Task.Delay(
-                700,
-                cancellationToken);
+                try
+                {
+                    var main =
+                        WindowInfo.FindWindowByProcessAndTitle(
+                            processName,
+                            "SOFT RESTAURANT");
+
+                    if (main != IntPtr.Zero)
+                    {
+                        NativeMethods.SetForegroundWindow(
+                            main);
+
+                        await Task.Delay(
+                            500,
+                            cancellationToken);
+                    }
+                }
+                catch
+                {
+                }
+
+                continue;
+            }
         }
 
         Console.WriteLine();
         Console.WriteLine(
-            "=== RESUMEN V6.18.61A ===");
+            "=== RESUMEN V6.18.80 ===");
 
         Console.WriteLine(
             $"[RESUMEN] Usuarios={orderedUsers.Count}");
@@ -2529,10 +2862,288 @@ public sealed class WorkflowRunner
             $"[RESUMEN] YaExistian={skippedExisting}");
 
         Console.WriteLine(
-            $"[RESUMEN] Destino=\"{monthFolder}\"");
+            $"[RESUMEN] Fallidos={failed}");
+
+        if (failedUsers.Count > 0)
+        {
+            Console.WriteLine(
+                "[RESUMEN][FALLIDOS] " +
+                string.Join(
+                    ", ",
+                    failedUsers));
+        }
 
         Console.WriteLine(
-            "[V6.18.61A][OK] Se procesaron todos los usuarios con cierre detectado.");
+            $"[RESUMEN] Destino=\"{monthFolder}\"");
+
+        if (failed == 0)
+        {
+            Console.WriteLine(
+                "[V6.18.80][OK] Todos los cierres detectados fueron procesados.");
+        }
+        else
+        {
+            Console.WriteLine(
+                "[V6.18.80][WARN] El proceso terminó con errores aislados; los demás usuarios continuaron.");
+        }
+    }
+
+    private sealed class SanPedroClosureUserHistory
+    {
+        public int ClosureDays { get; set; }
+        public string? LastClosureDate { get; set; }
+    }
+
+    private static string GetSanPedroClosureHistoryPath()
+    {
+        var dataDirectory =
+            @"C:\ParrillitaIA\Data";
+
+        Directory.CreateDirectory(
+            dataDirectory);
+
+        return Path.Combine(
+            dataDirectory,
+            "closure-users-history-SAN_PEDRO.json");
+    }
+
+    private static Dictionary<string, SanPedroClosureUserHistory>
+        LoadSanPedroClosureHistory()
+    {
+        var path =
+            GetSanPedroClosureHistoryPath();
+
+        if (!File.Exists(
+                path))
+        {
+            return new Dictionary<string, SanPedroClosureUserHistory>(
+                StringComparer.OrdinalIgnoreCase);
+        }
+
+        try
+        {
+            var json =
+                File.ReadAllText(
+                    path);
+
+            var parsed =
+                JsonSerializer.Deserialize<
+                    Dictionary<string, SanPedroClosureUserHistory>>(
+                    json);
+
+            return parsed is null
+                ? new Dictionary<string, SanPedroClosureUserHistory>(
+                    StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, SanPedroClosureUserHistory>(
+                    parsed,
+                    StringComparer.OrdinalIgnoreCase);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(
+                $"[PRIORITY][WARN] No se pudo leer historial SAN_PEDRO: {ex.Message}");
+
+            return new Dictionary<string, SanPedroClosureUserHistory>(
+                StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    private static bool ShouldRunFullAudit(
+        DateTime reportDate,
+        int historyCount)
+    {
+        // Forzar auditoría completa manualmente:
+        //   $env:PARRILLITA_FORCE_FULL_SCAN="1"
+        var force =
+            Environment.GetEnvironmentVariable(
+                "PARRILLITA_FORCE_FULL_SCAN");
+
+        if (string.Equals(
+                force,
+                "1",
+                StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(
+                force,
+                "true",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine(
+                "[SCAN][MODE] Auditoría completa FORZADA por PARRILLITA_FORCE_FULL_SCAN.");
+
+            return true;
+        }
+
+        // Sin historial no hay candidatos confiables; el primer aprendizaje
+        // necesita un barrido completo.
+        if (historyCount == 0)
+        {
+            Console.WriteLine(
+                "[SCAN][MODE] Sin historial: auditoría completa para aprendizaje inicial.");
+
+            return true;
+        }
+
+        // La auditoría semanal corresponde al cierre del domingo.
+        // Normalmente se ejecutará el lunes por la mañana porque reportDate=AYER.
+        if (reportDate.DayOfWeek ==
+            DayOfWeek.Sunday)
+        {
+            Console.WriteLine(
+                "[SCAN][MODE] Auditoría semanal: fecha de reporte es domingo.");
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private static int GetDailyScanLimit()
+    {
+        const int defaultLimit =
+            8;
+
+        var raw =
+            Environment.GetEnvironmentVariable(
+                "PARRILLITA_DAILY_SCAN_LIMIT");
+
+        if (int.TryParse(
+                raw,
+                out var parsed))
+        {
+            return Math.Clamp(
+                parsed,
+                3,
+                46);
+        }
+
+        return defaultLimit;
+    }
+
+    private static List<string> BuildPriorityUserOrder(
+        IReadOnlyList<string> allUsers,
+        IReadOnlyDictionary<string, SanPedroClosureUserHistory> history)
+    {
+        var originalIndex =
+            allUsers
+                .Select(
+                    (name, index) =>
+                        new
+                        {
+                            name,
+                            index
+                        })
+                .ToDictionary(
+                    x => x.name,
+                    x => x.index,
+                    StringComparer.OrdinalIgnoreCase);
+
+        return allUsers
+            .OrderByDescending(
+                user =>
+                {
+                    if (!history.TryGetValue(
+                            user,
+                            out var item))
+                    {
+                        return 0;
+                    }
+
+                    return item.ClosureDays;
+                })
+            .ThenByDescending(
+                user =>
+                {
+                    if (!history.TryGetValue(
+                            user,
+                            out var item))
+                    {
+                        return DateTime.MinValue;
+                    }
+
+                    return DateTime.TryParse(
+                        item.LastClosureDate,
+                        out var parsed)
+                        ? parsed
+                        : DateTime.MinValue;
+                })
+            .ThenBy(
+                user =>
+                    originalIndex[user])
+            .ToList();
+    }
+
+    private static void UpdateSanPedroClosureHistory(
+        Dictionary<string, SanPedroClosureUserHistory> history,
+        IReadOnlyCollection<string> usersWithClosure,
+        DateTime reportDate)
+    {
+        var reportDateKey =
+            reportDate.ToString(
+                "yyyy-MM-dd");
+
+        foreach (var user in usersWithClosure)
+        {
+            if (!history.TryGetValue(
+                    user,
+                    out var item))
+            {
+                item =
+                    new SanPedroClosureUserHistory();
+
+                history[user] =
+                    item;
+            }
+
+            // Una repetición del bot el mismo día no aumenta artificialmente
+            // la frecuencia histórica.
+            if (!string.Equals(
+                    item.LastClosureDate,
+                    reportDateKey,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                item.ClosureDays++;
+            }
+
+            item.LastClosureDate =
+                reportDateKey;
+        }
+
+        try
+        {
+            var path =
+                GetSanPedroClosureHistoryPath();
+
+            var json =
+                JsonSerializer.Serialize(
+                    history,
+                    new JsonSerializerOptions
+                    {
+                        WriteIndented = true
+                    });
+
+            File.WriteAllText(
+                path,
+                json);
+
+            Console.WriteLine(
+                $"[PRIORITY][SAVED] \"{path}\"");
+
+            foreach (var user in usersWithClosure)
+            {
+                var item =
+                    history[user];
+
+                Console.WriteLine(
+                    $"[PRIORITY][LEARNED] Usuario={user}; " +
+                    $"DiasConCierre={item.ClosureDays}; " +
+                    $"Ultimo={item.LastClosureDate}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(
+                $"[PRIORITY][WARN] No se pudo guardar historial SAN_PEDRO: {ex.Message}");
+        }
     }
 
     private static string MakeSafeFilePart(
@@ -2668,6 +3279,253 @@ public sealed class WorkflowRunner
         return Path.GetFullPath(
             Environment.ExpandEnvironmentVariables(
                 value.Trim()));
+    }
+
+    private static string ResolveExistingCashClosuresRoot(
+        string configuredRoot)
+    {
+        var expanded =
+            Path.GetFullPath(
+                Environment.ExpandEnvironmentVariables(
+                    configuredRoot));
+
+        if (Directory.Exists(
+                expanded))
+        {
+            Console.WriteLine(
+                $"[CONFIG][CIERRES][OK] Ruta configurada existe: \"{expanded}\"");
+
+            return expanded;
+        }
+
+        Console.WriteLine(
+            $"[CONFIG][CIERRES][WARN] Ruta configurada no existe: \"{expanded}\"");
+
+        var tail =
+            TryGetClosuresTail(
+                expanded);
+
+        if (string.IsNullOrWhiteSpace(
+                tail))
+        {
+            throw new DirectoryNotFoundException(
+                $"No existe OneDriveCashClosuresRoot y no se pudo derivar " +
+                $"la carpeta relativa de cierres: {expanded}");
+        }
+
+        Console.WriteLine(
+            $"[CONFIG][CIERRES] Cola buscada=\"{tail}\"");
+
+        var profileCandidates =
+            new List<string>();
+
+        var configuredProfile =
+            TryGetWindowsUserProfileRoot(
+                expanded);
+
+        if (!string.IsNullOrWhiteSpace(
+                configuredProfile))
+        {
+            profileCandidates.Add(
+                configuredProfile);
+        }
+
+        var currentProfile =
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.UserProfile);
+
+        if (!string.IsNullOrWhiteSpace(
+                currentProfile) &&
+            !profileCandidates.Contains(
+                currentProfile,
+                StringComparer.OrdinalIgnoreCase))
+        {
+            profileCandidates.Add(
+                currentProfile);
+        }
+
+        var usersRoot =
+            string.IsNullOrWhiteSpace(currentProfile)
+                ? null
+                : Path.GetDirectoryName(currentProfile);
+
+        foreach (var profile in profileCandidates)
+        {
+            var found =
+                FindClosuresRootUnderProfile(
+                    profile,
+                    tail);
+
+            if (!string.IsNullOrWhiteSpace(
+                    found))
+            {
+                Console.WriteLine(
+                    $"[CONFIG][CIERRES][RECOVERED] \"{found}\"");
+
+                return found;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(
+                usersRoot) &&
+            Directory.Exists(
+                usersRoot))
+        {
+            foreach (var profile in SafeGetDirectories(
+                         usersRoot))
+            {
+                var found =
+                    FindClosuresRootUnderProfile(
+                        profile,
+                        tail);
+
+                if (!string.IsNullOrWhiteSpace(
+                        found))
+                {
+                    Console.WriteLine(
+                        $"[CONFIG][CIERRES][RECOVERED] \"{found}\"");
+
+                    return found;
+                }
+            }
+        }
+
+        throw new DirectoryNotFoundException(
+            $"No existe OneDriveCashClosuresRoot configurada y tampoco se encontró " +
+            $"automáticamente una carpeta equivalente. Configurada: {expanded}");
+    }
+
+    private static string? FindClosuresRootUnderProfile(
+        string profile,
+        string tail)
+    {
+        if (!Directory.Exists(
+                profile))
+        {
+            return null;
+        }
+
+        var direct =
+            Path.Combine(
+                profile,
+                tail);
+
+        if (Directory.Exists(
+                direct))
+        {
+            return Path.GetFullPath(
+                direct);
+        }
+
+        foreach (var oneDrive in SafeGetDirectories(
+                     profile))
+        {
+            var name =
+                Path.GetFileName(
+                    oneDrive);
+
+            if (!name.StartsWith(
+                    "OneDrive",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            Console.WriteLine(
+                $"[CONFIG][CIERRES][ONEDRIVE-CANDIDATE] \"{oneDrive}\"");
+
+            var candidate =
+                Path.Combine(
+                    oneDrive,
+                    tail);
+
+            if (Directory.Exists(
+                    candidate))
+            {
+                return Path.GetFullPath(
+                    candidate);
+            }
+        }
+
+        return null;
+    }
+
+    private static string TryGetClosuresTail(
+        string configuredRoot)
+    {
+        var marker =
+            "Archivos de Cierres - CIERRES 2026";
+
+        var index =
+            configuredRoot.IndexOf(
+                marker,
+                StringComparison.OrdinalIgnoreCase);
+
+        if (index < 0)
+            return "";
+
+        return configuredRoot[
+            index..]
+            .TrimStart(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar);
+    }
+
+    private static string? TryGetWindowsUserProfileRoot(
+        string path)
+    {
+        try
+        {
+            var root =
+                Path.GetPathRoot(
+                    path);
+
+            if (string.IsNullOrWhiteSpace(
+                    root))
+            {
+                return null;
+            }
+
+            var relative =
+                path.Substring(
+                    root.Length);
+
+            var parts =
+                relative.Split(
+                    Path.DirectorySeparatorChar,
+                    StringSplitOptions.RemoveEmptyEntries);
+
+            if (parts.Length >= 2 &&
+                string.Equals(
+                    parts[0],
+                    "Users",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return Path.Combine(
+                    root,
+                    parts[0],
+                    parts[1]);
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<string> SafeGetDirectories(
+        string path)
+    {
+        try
+        {
+            return Directory.GetDirectories(
+                path);
+        }
+        catch
+        {
+            return Array.Empty<string>();
+        }
     }
 
     private static string ResolveExistingMonthFolder(
@@ -3549,6 +4407,199 @@ public sealed class WorkflowRunner
         }
     }
 
+    private readonly record struct StableTurnSignal(
+        bool HasClosure,
+        bool IsStable,
+        int DarkPixels,
+        int SampledPixels,
+        int Samples);
+
+    private static async Task<bool> WaitForSelectedUserValueAsync(
+        int anchorX,
+        int anchorY,
+        string expectedUser,
+        CancellationToken cancellationToken)
+    {
+        // No leer txtprecorte hasta que cboestacion confirme que el
+        // usuario seleccionado ya fue aplicado por SoftRestaurant.
+        for (var attempt = 1;
+             attempt <= 10;
+             attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var probe =
+                TryReadAccessibleProbeAtPoint(
+                    anchorX,
+                    anchorY);
+
+            var current =
+                probe?.Value?.Trim() ?? "";
+
+            if (string.Equals(
+                    current,
+                    expectedUser,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine(
+                    $"[SCAN][READBACK] Usuario=\"{expectedUser}\" confirmado en intento {attempt}.");
+
+                // Pequeño margen para que los campos dependientes terminen
+                // de refrescarse después del cambio de usuario.
+                await Task.Delay(
+                    220,
+                    cancellationToken);
+
+                return true;
+            }
+
+            await Task.Delay(
+                120,
+                cancellationToken);
+        }
+
+        var finalProbe =
+            TryReadAccessibleProbeAtPoint(
+                anchorX,
+                anchorY);
+
+        Console.WriteLine(
+            $"[SCAN][READBACK][WARN] Esperado=\"{expectedUser}\" " +
+            $"Actual=\"{finalProbe?.Value ?? ""}\"");
+
+        return false;
+    }
+
+    private static async Task<StableTurnSignal> ReadStableTurnSignalAsync(
+        int left,
+        int top,
+        int width,
+        int height,
+        CancellationToken cancellationToken)
+    {
+        // Se toman varias muestras del mismo control para descartar
+        // restos visuales/transitorios al cambiar de usuario.
+        var samples =
+            new List<int>();
+
+        var sampledPixels =
+            0;
+
+        for (var i = 0;
+             i < 5;
+             i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            HasVisibleTurnData(
+                left,
+                top,
+                width,
+                height,
+                out var dark,
+                out sampledPixels);
+
+            samples.Add(
+                dark);
+
+            if (samples.Count >= 3)
+            {
+                var a =
+                    samples[^1];
+
+                var b =
+                    samples[^2];
+
+                var c =
+                    samples[^3];
+
+                var max =
+                    Math.Max(
+                        a,
+                        Math.Max(
+                            b,
+                            c));
+
+                var min =
+                    Math.Min(
+                        a,
+                        Math.Min(
+                            b,
+                            c));
+
+                // Variación pequeña = la UI dejó de cambiar.
+                if (max - min <= 8)
+                {
+                    var stableDark =
+                        (a + b + c) / 3;
+
+                    // En pruebas reales los cierres válidos han dado
+                    // señales >300. No usamos ese valor como umbral rígido:
+                    // cualquier señal positiva estable se revalida una vez más
+                    // si está en zona baja para evitar falsos positivos.
+                    if (stableDark > 0 &&
+                        stableDark < 100)
+                    {
+                        await Task.Delay(
+                            300,
+                            cancellationToken);
+
+                        HasVisibleTurnData(
+                            left,
+                            top,
+                            width,
+                            height,
+                            out var confirmDark,
+                            out sampledPixels);
+
+                        Console.WriteLine(
+                            $"[SCAN][LOW-SIGNAL] Inicial={stableDark}; Confirmación={confirmDark}");
+
+                        // Una señal baja se considera cierre solo si se mantiene
+                        // y supera claramente el ruido residual observado.
+                        var lowSignalConfirmed =
+                            confirmDark >= 100;
+
+                        return new StableTurnSignal(
+                            lowSignalConfirmed,
+                            true,
+                            confirmDark,
+                            sampledPixels,
+                            samples.Count + 1);
+                    }
+
+                    return new StableTurnSignal(
+                        stableDark > 0,
+                        true,
+                        stableDark,
+                        sampledPixels,
+                        samples.Count);
+                }
+            }
+
+            await Task.Delay(
+                120,
+                cancellationToken);
+        }
+
+        var last =
+            samples.Count > 0
+                ? samples[^1]
+                : 0;
+
+        // Si nunca estabilizó, no declarar cierre. Es más seguro seguir
+        // buscando que cortar el barrido por una lectura transitoria.
+        Console.WriteLine(
+            $"[SCAN][UNSTABLE] Señal no estable: {string.Join(",", samples)}");
+
+        return new StableTurnSignal(
+            false,
+            false,
+            last,
+            sampledPixels,
+            samples.Count);
+    }
+
     private static bool HasVisibleTurnData(
         int left,
         int top,
@@ -3572,7 +4623,7 @@ public sealed class WorkflowRunner
 
         try
         {
-            // Ignorar borde del TextBox para no confundirlo con contenido.
+            // Misma región interior utilizada por las versiones estables.
             var x0 =
                 left + 4;
 
@@ -3585,13 +4636,31 @@ public sealed class WorkflowRunner
             var y1 =
                 top + height - 5;
 
+            var fullPixelCount =
+                Math.Max(
+                    1,
+                    (x1 - x0 + 1) *
+                    (y1 - y0 + 1));
+
+            // GetPixel individual es el cuello de botella medido.
+            // Se usa una rejilla fija y después se normaliza a la escala
+            // histórica completa para conservar los umbrales ya probados.
+            const int stride =
+                4;
+
+            var sampledDark =
+                0;
+
+            var actualSamples =
+                0;
+
             for (var y = y0;
                  y <= y1;
-                 y++)
+                 y += stride)
             {
                 for (var x = x0;
                      x <= x1;
-                     x++)
+                     x += stride)
                 {
                     var pixel =
                         NativeMethods.GetPixel(
@@ -3608,22 +4677,29 @@ public sealed class WorkflowRunner
                     var b =
                         (int)((pixel >> 16) & 0xFF);
 
-                    sampledPixels++;
+                    actualSamples++;
 
-                    // Texto de fecha/hora es oscuro sobre fondo claro.
-                    // Umbral deliberadamente conservador para ignorar
-                    // sombras suaves del tema.
                     if (r < 135 &&
                         g < 135 &&
                         b < 135)
                     {
-                        darkPixels++;
+                        sampledDark++;
                     }
                 }
             }
 
-            // Una fecha/hora completa produce muchos píxeles oscuros.
-            // Un campo vacío debería quedar prácticamente en cero.
+            if (actualSamples <= 0)
+                return false;
+
+            darkPixels =
+                (int)Math.Round(
+                    sampledDark *
+                    (double)fullPixelCount /
+                    actualSamples);
+
+            sampledPixels =
+                fullPixelCount;
+
             return darkPixels >= 8;
         }
         finally
@@ -3633,7 +4709,6 @@ public sealed class WorkflowRunner
                 hdc);
         }
     }
-
 
     private static ulong CaptureTurnSelectionFingerprint(
         int turnLeft,
@@ -3979,6 +5054,309 @@ public sealed class WorkflowRunner
         }
 
         return orderedUsers;
+    }
+
+    private sealed class UserVisualCursorState
+    {
+        public int ApproxTopIndex { get; set; } = 0;
+        public string? LastSelectedUser { get; set; }
+        public bool Initialized { get; set; }
+    }
+
+    private static async Task<bool> SelectAccessibleUserByNameOptimizedAsync(
+        int anchorX,
+        int anchorY,
+        string targetUser,
+        IReadOnlyList<string> orderedUsers,
+        UserVisualCursorState state,
+        CancellationToken cancellationToken)
+    {
+        var targetIndex =
+            -1;
+
+        for (var i = 0;
+             i < orderedUsers.Count;
+             i++)
+        {
+            if (string.Equals(
+                    orderedUsers[i],
+                    targetUser,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                targetIndex =
+                    i;
+                break;
+            }
+        }
+
+        if (targetIndex < 0)
+        {
+            Console.WriteLine(
+                $"[A11Y-OPT][ERROR] Usuario no existe en orderedUsers: {targetUser}");
+
+            return false;
+        }
+
+        await OpenUserDropdownAsync(
+            anchorX,
+            anchorY,
+            cancellationToken);
+
+        var visible =
+            ReadVisibleAccessibleUsers(
+                anchorX,
+                anchorY);
+
+        // ------------------------------------------------------------
+        // FAST PATH 1:
+        // si el usuario ya está visible, seleccionarlo inmediatamente.
+        // ------------------------------------------------------------
+        var direct =
+            visible.FirstOrDefault(
+                x => string.Equals(
+                    x.Name,
+                    targetUser,
+                    StringComparison.OrdinalIgnoreCase));
+
+        if (direct is not null)
+        {
+            Console.WriteLine(
+                $"[A11Y-OPT][VISIBLE] \"{targetUser}\" " +
+                $"Bounds=({direct.Left},{direct.Top},{direct.Width},{direct.Height})");
+
+            NativeMethods.SetCursorPos(
+                direct.Left + direct.Width / 2,
+                direct.Top + direct.Height / 2);
+
+            Click();
+
+            await Task.Delay(
+                250,
+                cancellationToken);
+
+            state.LastSelectedUser =
+                targetUser;
+
+            if (visible.Count > 0)
+            {
+                var firstVisible =
+                    orderedUsers
+                        .Select(
+                            (name, index) =>
+                                new
+                                {
+                                    name,
+                                    index
+                                })
+                        .FirstOrDefault(
+                            x => string.Equals(
+                                x.name,
+                                visible[0].Name,
+                                StringComparison.OrdinalIgnoreCase));
+
+                if (firstVisible is not null)
+                {
+                    state.ApproxTopIndex =
+                        firstVisible.index;
+
+                    state.Initialized =
+                        true;
+                }
+            }
+
+            return true;
+        }
+
+        // ------------------------------------------------------------
+        // FAST PATH 2:
+        // estimar dirección según índice objetivo y viewport actual.
+        // No volver al inicio salvo que sea estrictamente necesario.
+        // ------------------------------------------------------------
+        var currentTop =
+            state.Initialized
+                ? state.ApproxTopIndex
+                : 0;
+
+        if (visible.Count > 0)
+        {
+            var firstVisibleIndex =
+                -1;
+
+            for (var i = 0;
+                 i < orderedUsers.Count;
+                 i++)
+            {
+                if (string.Equals(
+                        orderedUsers[i],
+                        visible[0].Name,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    firstVisibleIndex =
+                        i;
+                    break;
+                }
+            }
+
+            if (firstVisibleIndex >= 0)
+            {
+                currentTop =
+                    firstVisibleIndex;
+
+                state.ApproxTopIndex =
+                    currentTop;
+
+                state.Initialized =
+                    true;
+            }
+        }
+
+        var visibleCapacity =
+            Math.Max(
+                1,
+                visible.Count);
+
+        var currentBottom =
+            currentTop +
+            visibleCapacity -
+            1;
+
+        var moveDown =
+            targetIndex > currentBottom;
+
+        var moveUp =
+            targetIndex < currentTop;
+
+        Console.WriteLine(
+            $"[A11Y-OPT][NAV] Target=\"{targetUser}\" Index={targetIndex}; " +
+            $"Viewport≈{currentTop}-{currentBottom}; " +
+            $"Dir={(moveDown ? "DOWN" : moveUp ? "UP" : "UNKNOWN")}");
+
+        // Si no pudimos inferir bien, usar el método estable existente.
+        if (!moveDown &&
+            !moveUp)
+        {
+            SendKey(
+                0x1B, // ESC
+                false,
+                false,
+                false);
+
+            await Task.Delay(
+                120,
+                cancellationToken);
+
+            return await SelectAccessibleUserByNameAsync(
+                anchorX,
+                anchorY,
+                targetUser,
+                orderedUsers,
+                cancellationToken);
+        }
+
+        var maxScrolls =
+            Math.Min(
+                60,
+                Math.Abs(
+                    targetIndex -
+                    currentTop) +
+                8);
+
+        for (var attempt = 0;
+             attempt < maxScrolls;
+             attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (moveDown)
+            {
+                ClickAccessibleScrollLineDown(
+                    anchorX,
+                    anchorY);
+            }
+            else
+            {
+                ClickAccessibleScrollLineUp(
+                    anchorX,
+                    anchorY);
+            }
+
+            await Task.Delay(
+                120,
+                cancellationToken);
+
+            visible =
+                ReadVisibleAccessibleUsers(
+                    anchorX,
+                    anchorY);
+
+            direct =
+                visible.FirstOrDefault(
+                    x => string.Equals(
+                        x.Name,
+                        targetUser,
+                        StringComparison.OrdinalIgnoreCase));
+
+            if (direct is not null)
+            {
+                Console.WriteLine(
+                    $"[A11Y-OPT][FOUND] \"{targetUser}\" tras {attempt + 1} scroll(s).");
+
+                NativeMethods.SetCursorPos(
+                    direct.Left + direct.Width / 2,
+                    direct.Top + direct.Height / 2);
+
+                Click();
+
+                await Task.Delay(
+                    250,
+                    cancellationToken);
+
+                state.LastSelectedUser =
+                    targetUser;
+
+                if (visible.Count > 0)
+                {
+                    for (var i = 0;
+                         i < orderedUsers.Count;
+                         i++)
+                    {
+                        if (string.Equals(
+                                orderedUsers[i],
+                                visible[0].Name,
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            state.ApproxTopIndex =
+                                i;
+                            state.Initialized =
+                                true;
+                            break;
+                        }
+                    }
+                }
+
+                return true;
+            }
+        }
+
+        Console.WriteLine(
+            $"[A11Y-OPT][FALLBACK] No se encontró \"{targetUser}\" con navegación optimizada.");
+
+        SendKey(
+            0x1B, // ESC
+            false,
+            false,
+            false);
+
+        await Task.Delay(
+            120,
+            cancellationToken);
+
+        return await SelectAccessibleUserByNameAsync(
+            anchorX,
+            anchorY,
+            targetUser,
+            orderedUsers,
+            cancellationToken);
     }
 
     private static async Task<bool> SelectAccessibleUserByNameAsync(
