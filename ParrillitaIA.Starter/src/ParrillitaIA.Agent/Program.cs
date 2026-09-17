@@ -2,12 +2,25 @@ using Microsoft.Extensions.Options;
 using ParrillitaIA.Agent.Options;
 using ParrillitaIA.Agent.Services;
 
-var builder = Host.CreateApplicationBuilder(args);
+using var singleInstanceMutex =
+    new Mutex(
+        initiallyOwned: true,
+        name: "ParrillitaIA.Agent.SingleInstance",
+        createdNew: out var createdNew);
 
-builder.Services.AddWindowsService(options =>
+if (!createdNew)
 {
-    options.ServiceName = "Parrillita IA Agent";
-});
+    Console.WriteLine(
+        "Parrillita IA Agent ya está ejecutándose en esta sesión.");
+
+    return;
+}
+
+var builder =
+    Host.CreateApplicationBuilder(args);
+
+// No usar AddWindowsService:
+// la automatización requiere una sesión interactiva de Windows.
 
 builder.Services
     .AddOptions<LocalOptions>()
@@ -33,18 +46,27 @@ builder.Services
     .ValidateDataAnnotations()
     .ValidateOnStart();
 
+builder.Services
+    .AddOptions<TrainerAutomationOptions>()
+    .Bind(builder.Configuration.GetSection(TrainerAutomationOptions.SectionName))
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
+
 builder.Services.AddSingleton<IClock, SystemClock>();
 builder.Services.AddSingleton<IReportFileNameService, ReportFileNameService>();
 builder.Services.AddSingleton<IDownloadValidator, DownloadValidator>();
 builder.Services.AddSingleton<IFileOrganizer, FileOrganizer>();
 builder.Services.AddSingleton<ICloudUploader, OneDriveSyncFolderUploader>();
 builder.Services.AddSingleton<IExecutionHistory, JsonExecutionHistory>();
+builder.Services.AddSingleton<ITrainerProcessRunner, TrainerProcessRunner>();
+builder.Services.AddSingleton<IDesktopProcessCleanup, DesktopProcessCleanup>();
 
-// Sustituir SimulatedSoftRestaurantBot por FlaUiSoftRestaurantBot
-// cuando se hayan identificado los controles reales con FlaUInspect.
+// Delivery todavía no es productivo y queda deshabilitado en appsettings.
 builder.Services.AddSingleton<ISoftRestaurantBot, SimulatedSoftRestaurantBot>();
 
 builder.Services.AddHostedService<AgentWorker>();
 
-var host = builder.Build();
+var host =
+    builder.Build();
+
 await host.RunAsync();

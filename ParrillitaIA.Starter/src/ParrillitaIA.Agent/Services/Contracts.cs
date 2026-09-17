@@ -18,11 +18,7 @@ public interface ISoftRestaurantBot
 public interface IReportFileNameService
 {
     string Build(ReportJob job, string extension);
-
-    // Ruta usada para conservar una copia local ordenada.
     string BuildArchiveRelativeFolder(ReportJob job);
-
-    // Ruta relativa dentro de la raíz de OneDrive configurada.
     string BuildOneDriveRelativeFolder(ReportJob job);
 }
 
@@ -52,5 +48,28 @@ public interface ICloudUploader
 
 public interface IExecutionHistory
 {
-    Task AppendAsync(ExecutionRecord record, CancellationToken cancellationToken);
+    Task AppendAsync(
+        ExecutionRecord record,
+        CancellationToken cancellationToken);
 }
+
+public interface ITrainerProcessRunner
+{
+    Task<TrainerRunResult> RunClosuresAsync(
+        DateOnly reportDate,
+        CancellationToken cancellationToken);
+}
+
+public interface IDesktopProcessCleanup
+{
+    Task CleanupAsync(
+        string reason,
+        CancellationToken cancellationToken);
+}
+
+public sealed record TrainerRunResult(
+    bool Success,
+    int ExitCode,
+    string LogFile,
+    string? ErrorCode,
+    string? ErrorMessage);
