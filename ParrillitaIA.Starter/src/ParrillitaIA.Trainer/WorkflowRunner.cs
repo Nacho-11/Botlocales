@@ -43,7 +43,7 @@ public sealed class WorkflowRunner
     {
         Console.WriteLine();
         Console.WriteLine(
-            "=== CIERRES V6.18.80 - BARRIDO COMPLETO OPTIMIZADO ===");
+            "=== CIERRES V6.18.82 - PRIORIDAD HISTORICA + COBERTURA COMPLETA ===");
 
         var steps =
             workflow.Steps
@@ -158,9 +158,9 @@ public sealed class WorkflowRunner
             $"TotalMs={closuresFlowWatch.ElapsedMilliseconds}");
 
         Console.WriteLine(
-            "[V6.18.80] Proceso de cierres terminado.");
+            "[V6.18.82] Proceso de cierres terminado.");
         Console.WriteLine(
-            "[V6.18.80] Revisa [PERF], [TIMING][USER], [TIMING][SCAN], [TIMING][CIERRES-FLOW], [EXPORT] y [RESUMEN].");
+            "[V6.18.82] Revisa [PRIORITY], [SCAN][PRECHECK], [SCAN][FOCUS], [TIMING][USER], [TIMING][SCAN], [EXPORT] y [RESUMEN].");
 
         // Diagnóstico activo por defecto. Al ser una decisión de runtime,
         // el compilador no marca el código productivo posterior como inaccesible.
@@ -1986,7 +1986,7 @@ public sealed class WorkflowRunner
         Console.WriteLine();
 
         Console.WriteLine(
-            "=== USER CLOSURE SEQUENTIAL FULL SCAN V6.18.80 + TIMING ===");
+            "=== USER CLOSURE PRIORITY FULL SCAN V6.18.82 + TIMING ===");
 
         var userSelection =
             await GetUserAnchorAsync(
@@ -2041,19 +2041,18 @@ public sealed class WorkflowRunner
         var firstUser =
             orderedUsers[0];
 
-        var firstSelected =
-            await SelectAccessibleUserByNameAsync(
-                userX,
-                userY,
-                firstUser,
-                orderedUsers,
-                cancellationToken);
-
-        if (!firstSelected)
-        {
-            throw new InvalidOperationException(
-                $"No se pudo seleccionar usuario inicial {firstUser}.");
-        }
+        // V6.18.81:
+        // Antes de inicializar Reporte, comprobar que el selector Usuario
+        // realmente acepta clics y que cboestacion confirma el valor.
+        // Esto evita iniciar un barrido completo si la UI quedó "pegada"
+        // en REPORTES aunque MSAA todavía exponga la lista.
+        await EnsureUserSelectionPrecheckAsync(
+            userSelection.Window,
+            userX,
+            userY,
+            firstUser,
+            orderedUsers,
+            cancellationToken);
 
         await SelectInitialReportMiniprinterThenLaserAsync(
             reportOpenStep,
@@ -2062,6 +2061,16 @@ public sealed class WorkflowRunner
 
         await Task.Delay(
             300,
+            cancellationToken);
+
+        // Reporte cambia foco/estado visual. Revalidamos Usuario una vez más
+        // antes de iniciar el barrido real.
+        await EnsureUserSelectionPrecheckAsync(
+            userSelection.Window,
+            userX,
+            userY,
+            firstUser,
+            orderedUsers,
             cancellationToken);
 
         var usersWithClosure =
@@ -2073,29 +2082,78 @@ public sealed class WorkflowRunner
         var priorityHistory =
             LoadSanPedroClosureHistory();
 
-        // PRODUCCION V6.18.78:
-        // El historial ya NO limita quién se revisa.
-        // Todos los usuarios se recorren diariamente en el mismo orden
-        // físico de la lista para evitar viajes arriba/abajo.
+        // PRODUCCION V6.18.82:
+        // El historial SÍ define prioridad, pero NUNCA limita cobertura.
+        // Primero se revisan usuarios con cierres históricos ordenados por:
+        //   1) más días con cierre,
+        //   2) cierre más reciente,
+        //   3) orden físico original como desempate.
+        // Después se revisa el resto. Todos aparecen exactamente una vez.
         var scanUsers =
-            orderedUsers.ToList();
+            BuildPriorityUserOrder(
+                orderedUsers,
+                priorityHistory);
+
+        var historicalPriorityUsers =
+            scanUsers
+                .Where(
+                    user =>
+                        priorityHistory.TryGetValue(
+                            user,
+                            out var item) &&
+                        item.ClosureDays > 0)
+                .ToList();
 
         Console.WriteLine();
         Console.WriteLine(
             $"[PRIORITY] Historial SAN_PEDRO: usuarios={priorityHistory.Count}");
 
         Console.WriteLine(
-            $"[SCAN][MODE] COMPLETO_SECUENCIAL_DIARIO; " +
+            $"[PRIORITY][ACTIVE] Usuarios prioritarios={historicalPriorityUsers.Count}");
+
+        if (historicalPriorityUsers.Count > 0)
+        {
+            Console.WriteLine(
+                "[PRIORITY][ORDER] " +
+                string.Join(
+                    " -> ",
+                    historicalPriorityUsers.Select(
+                        user =>
+                        {
+                            var item =
+                                priorityHistory[user];
+
+                            return
+                                $"{user}(Dias={item.ClosureDays},Ultimo={item.LastClosureDate})";
+                        })));
+        }
+        else
+        {
+            Console.WriteLine(
+                "[PRIORITY][ORDER] Sin usuarios con cierres históricos; se conserva orden físico.");
+        }
+
+        Console.WriteLine(
+            $"[SCAN][MODE] PRIORIDAD_HISTORICA_COBERTURA_COMPLETA; " +
             $"FechaReporte={reportDate:dd/MM/yyyy}; " +
             $"Usuarios={scanUsers.Count}/{orderedUsers.Count}");
 
         Console.WriteLine(
-            "[SCAN][SEQUENTIAL] Orden físico: " +
-            $"{scanUsers.First()} -> ... -> {scanUsers.Last()}");
+            "[SCAN][ORDER] Inicio recorrido: " +
+            string.Join(
+                " -> ",
+                scanUsers.Take(
+                    Math.Min(
+                        10,
+                        scanUsers.Count))) +
+            (scanUsers.Count > 10
+                ? " -> ..."
+                : ""));
 
         Console.WriteLine(
-            "[SCAN][SEQUENTIAL] Se revisan los 46 diariamente; " +
-            "solo se detiene antes si alcanza 3 cierres confirmados.");
+            "[SCAN][COVERAGE] Se revisan todos los usuarios exactamente una vez; " +
+            "el histórico solo cambia prioridad. " +
+            "Solo se detiene antes si alcanza 3 cierres confirmados.");
 
         var usersReviewed =
             0;
@@ -2145,8 +2203,15 @@ public sealed class WorkflowRunner
         var scanWatch =
             Stopwatch.StartNew();
 
+        // V6.18.81:
+        // Si varios usuarios consecutivos no pueden aplicarse por selección/
+        // readback, el problema es ambiental/de foco, no de un usuario
+        // particular. Abortamos rápido para que Agent haga cleanup y reintente.
+        var consecutiveUserSelectionFailures =
+            0;
+
         // ------------------------------------------------------------
-        // 3. Barrido diario completo EN ORDEN FÍSICO.
+        // 3. Barrido diario completo EN ORDEN DE PRIORIDAD HISTÓRICA.
         //    Cada usuario debe quedar CONCLUYENTE antes de contarse.
         //    Intento 1 usa navegación visual incremental.
         //    Intentos 2-3 usan la selección estable original.
@@ -2171,6 +2236,9 @@ public sealed class WorkflowRunner
             var userConclusive =
                 false;
 
+            var selectionProblemObserved =
+                false;
+
             var hasTurn =
                 false;
 
@@ -2193,6 +2261,13 @@ public sealed class WorkflowRunner
                     $"[SCAN][TRY] Usuario={user}; Intento={attempt}/3");
 
                 bool selected;
+
+                // Reafirmar la ventana interactiva antes de cada intento.
+                // SetForegroundWindow por sí solo puede no ser suficiente
+                // después de horas de inactividad.
+                await EnsureUserSelectionWindowInteractiveAsync(
+                    userSelection.Window,
+                    cancellationToken);
 
                 var selectionWatch =
                     Stopwatch.StartNew();
@@ -2224,6 +2299,9 @@ public sealed class WorkflowRunner
 
                 if (!selected)
                 {
+                    selectionProblemObserved =
+                        true;
+
                     Console.WriteLine(
                         $"[SCAN][RETRY] Usuario={user}; Motivo=ERROR_SELECCION");
 
@@ -2249,8 +2327,16 @@ public sealed class WorkflowRunner
 
                 if (!selectedValueOk)
                 {
+                    selectionProblemObserved =
+                        true;
+
                     Console.WriteLine(
                         $"[SCAN][RETRY] Usuario={user}; Motivo=ERROR_READBACK_USUARIO");
+
+                    // Recuperar foco/ventana antes del siguiente intento.
+                    await EnsureUserSelectionWindowInteractiveAsync(
+                        userSelection.Window,
+                        cancellationToken);
 
                     await Task.Delay(
                         220,
@@ -2330,8 +2416,42 @@ public sealed class WorkflowRunner
                     $"Signal={signalMs}ms " +
                     $"Resultado=INCONCLUSO");
 
+                if (selectionProblemObserved)
+                {
+                    consecutiveUserSelectionFailures++;
+
+                    var actualUser =
+                        ReadSelectedUserValue(
+                            userX,
+                            userY);
+
+                    Console.WriteLine(
+                        $"[SCAN][SELECTION-HEALTH] FallosConsecutivos={consecutiveUserSelectionFailures}; " +
+                        $"Actual=\"{actualUser}\"");
+
+                    if (consecutiveUserSelectionFailures >= 3)
+                    {
+                        Console.WriteLine(
+                            "[SCAN][ABORT][USER_SELECTION_STUCK] " +
+                            $"3 usuarios consecutivos no pudieron aplicarse. " +
+                            $"UltimoEsperado=\"{user}\" Actual=\"{actualUser}\". " +
+                            "Se aborta para permitir cleanup y reintento del Agent.");
+
+                        throw new InvalidOperationException(
+                            "USER_SELECTION_STUCK: el selector Usuario no está aplicando cambios.");
+                    }
+                }
+                else
+                {
+                    consecutiveUserSelectionFailures =
+                        0;
+                }
+
                 continue;
             }
+
+            consecutiveUserSelectionFailures =
+                0;
 
             usersReviewed++;
 
@@ -2847,7 +2967,7 @@ public sealed class WorkflowRunner
 
         Console.WriteLine();
         Console.WriteLine(
-            "=== RESUMEN V6.18.80 ===");
+            "=== RESUMEN V6.18.82 ===");
 
         Console.WriteLine(
             $"[RESUMEN] Usuarios={orderedUsers.Count}");
@@ -2879,12 +2999,20 @@ public sealed class WorkflowRunner
         if (failed == 0)
         {
             Console.WriteLine(
-                "[V6.18.80][OK] Todos los cierres detectados fueron procesados.");
+                "[V6.18.82][OK] Todos los cierres detectados fueron procesados.");
+
+            // Compatibilidad con el validador actual del Agent.
+            Console.WriteLine(
+                "[V6.18.80][OK] Compatibilidad: resultado V6.18.82 correcto.");
         }
         else
         {
             Console.WriteLine(
-                "[V6.18.80][WARN] El proceso terminó con errores aislados; los demás usuarios continuaron.");
+                "[V6.18.82][WARN] El proceso terminó con errores aislados; los demás usuarios continuaron.");
+
+            // Compatibilidad con el validador actual del Agent.
+            Console.WriteLine(
+                "[V6.18.80][WARN] Compatibilidad: V6.18.81 terminó con errores aislados.");
         }
     }
 
@@ -4413,6 +4541,309 @@ public sealed class WorkflowRunner
         int DarkPixels,
         int SampledPixels,
         int Samples);
+
+
+    // ------------------------------------------------------------
+    // V6.18.81 - Robustez de ventana / precheck de Usuario
+    // ------------------------------------------------------------
+    private static async Task EnsureUserSelectionPrecheckAsync(
+        IntPtr userWindow,
+        int anchorX,
+        int anchorY,
+        string expectedUser,
+        IReadOnlyList<string> orderedUsers,
+        CancellationToken cancellationToken)
+    {
+        Console.WriteLine(
+            $"[SCAN][PRECHECK] Validando selector Usuario con \"{expectedUser}\"...");
+
+        for (var attempt = 1;
+             attempt <= 3;
+             attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // V6.18.81B:
+            // El primer intento conserva EXACTAMENTE la ruta de selección
+            // estable que ya funcionaba en V6.18.80. Solo hacemos recuperación
+            // agresiva de foco después de que un intento real falle.
+            if (attempt > 1)
+            {
+                Console.WriteLine(
+                    $"[SCAN][PRECHECK][RECOVERY] Recuperando foco antes del intento {attempt}/3.");
+
+                await EnsureUserSelectionWindowInteractiveAsync(
+                    userWindow,
+                    cancellationToken);
+
+                await Task.Delay(
+                    200,
+                    cancellationToken);
+            }
+
+            // IMPORTANTE V6.18.81C:
+            // NO enviar ESC aquí. El flujo normal ya cerró el dropdown después
+            // de enumerar usuarios. Un ESC adicional puede cerrar el propio
+            // formulario "Formas de pago por turno", dejando el anchor sin
+            // lista accesible y provocando SELECT-FAIL inmediato.
+            var selected =
+                await SelectAccessibleUserByNameAsync(
+                    anchorX,
+                    anchorY,
+                    expectedUser,
+                    orderedUsers,
+                    cancellationToken);
+
+            if (!selected)
+            {
+                Console.WriteLine(
+                    $"[SCAN][PRECHECK][SELECT-FAIL] Intento={attempt}/3; " +
+                    $"no se pudo localizar/clicar \"{expectedUser}\".");
+            }
+            else
+            {
+                var readbackOk =
+                    await WaitForSelectedUserValueAsync(
+                        anchorX,
+                        anchorY,
+                        expectedUser,
+                        cancellationToken);
+
+                if (readbackOk)
+                {
+                    Console.WriteLine(
+                        $"[SCAN][PRECHECK][OK] Usuario=\"{expectedUser}\" aplicado en intento {attempt}/3.");
+
+                    return;
+                }
+            }
+
+            var actual =
+                ReadSelectedUserValue(
+                    anchorX,
+                    anchorY);
+
+            Console.WriteLine(
+                $"[SCAN][PRECHECK][RETRY] Intento={attempt}/3; " +
+                $"Esperado=\"{expectedUser}\" Actual=\"{actual}\"");
+
+            // Recuperar foco INMEDIATAMENTE después del fallo para que el
+            // siguiente intento no dependa del estado que dejó el anterior.
+            await EnsureUserSelectionWindowInteractiveAsync(
+                userWindow,
+                cancellationToken);
+
+            await Task.Delay(
+                500,
+                cancellationToken);
+        }
+
+        var finalActual =
+            ReadSelectedUserValue(
+                anchorX,
+                anchorY);
+
+        Console.WriteLine(
+            "[SCAN][ABORT][USER_SELECTION_STUCK] " +
+            $"PRECHECK falló. Esperado=\"{expectedUser}\" Actual=\"{finalActual}\".");
+
+        throw new InvalidOperationException(
+            "USER_SELECTION_STUCK: precheck de Usuario falló.");
+    }
+
+    private static string ReadSelectedUserValue(
+        int anchorX,
+        int anchorY)
+    {
+        var probe =
+            TryReadAccessibleProbeAtPoint(
+                anchorX,
+                anchorY);
+
+        return probe?.Value?.Trim() ?? "";
+    }
+
+    private static async Task EnsureUserSelectionWindowInteractiveAsync(
+        IntPtr userWindow,
+        CancellationToken cancellationToken)
+    {
+        if (userWindow == IntPtr.Zero)
+            return;
+
+        var root =
+            GetAncestorV61881(
+                userWindow,
+                2); // GA_ROOT
+
+        if (root == IntPtr.Zero)
+            root =
+                userWindow;
+
+        try
+        {
+            if (IsIconicV61881(
+                    root))
+            {
+                ShowWindowAsyncV61881(
+                    root,
+                    9); // SW_RESTORE
+
+                await Task.Delay(
+                    250,
+                    cancellationToken);
+            }
+
+            BringWindowToTopV61881(
+                root);
+
+            NativeMethods.SetForegroundWindow(
+                root);
+
+            var foreground =
+                GetForegroundWindowV61881();
+
+            if (foreground != root)
+            {
+                // Cuando la tarea lleva horas inactiva, Windows puede negar
+                // SetForegroundWindow. Adjuntar temporalmente las colas de
+                // entrada permite reafirmar foco sin enviar clics ciegos.
+                var currentThread =
+                    GetCurrentThreadIdV61881();
+
+                var foregroundThread =
+                    foreground == IntPtr.Zero
+                        ? 0u
+                        : GetWindowThreadProcessIdV61881(
+                            foreground,
+                            IntPtr.Zero);
+
+                var targetThread =
+                    GetWindowThreadProcessIdV61881(
+                        root,
+                        IntPtr.Zero);
+
+                var attachedForeground =
+                    false;
+
+                var attachedTarget =
+                    false;
+
+                try
+                {
+                    if (foregroundThread != 0 &&
+                        foregroundThread != currentThread)
+                    {
+                        attachedForeground =
+                            AttachThreadInputV61881(
+                                currentThread,
+                                foregroundThread,
+                                true);
+                    }
+
+                    if (targetThread != 0 &&
+                        targetThread != currentThread)
+                    {
+                        attachedTarget =
+                            AttachThreadInputV61881(
+                                currentThread,
+                                targetThread,
+                                true);
+                    }
+
+                    BringWindowToTopV61881(
+                        root);
+
+                    SetActiveWindowV61881(
+                        root);
+
+                    NativeMethods.SetForegroundWindow(
+                        root);
+                }
+                finally
+                {
+                    if (attachedTarget)
+                    {
+                        AttachThreadInputV61881(
+                            currentThread,
+                            targetThread,
+                            false);
+                    }
+
+                    if (attachedForeground)
+                    {
+                        AttachThreadInputV61881(
+                            currentThread,
+                            foregroundThread,
+                            false);
+                    }
+                }
+            }
+
+            // El formulario puede ser un child/MDI dentro del root.
+            NativeMethods.SetFocus(
+                userWindow);
+
+            await Task.Delay(
+                250,
+                cancellationToken);
+
+            var confirmedForeground =
+                GetForegroundWindowV61881();
+
+            Console.WriteLine(
+                $"[SCAN][FOCUS] Root=0x{root.ToInt64():X}; " +
+                $"Foreground=0x{confirmedForeground.ToInt64():X}; " +
+                $"OK={(confirmedForeground == root)}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(
+                $"[SCAN][FOCUS][WARN] {ex.Message}");
+        }
+    }
+
+    [DllImport("user32.dll", EntryPoint = "GetForegroundWindow")]
+    private static extern IntPtr GetForegroundWindowV61881();
+
+    [DllImport("user32.dll", EntryPoint = "IsIconic")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsIconicV61881(
+        IntPtr hWnd);
+
+    [DllImport("user32.dll", EntryPoint = "ShowWindowAsync")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindowAsyncV61881(
+        IntPtr hWnd,
+        int nCmdShow);
+
+    [DllImport("user32.dll", EntryPoint = "BringWindowToTop")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool BringWindowToTopV61881(
+        IntPtr hWnd);
+
+    [DllImport("user32.dll", EntryPoint = "SetActiveWindow")]
+    private static extern IntPtr SetActiveWindowV61881(
+        IntPtr hWnd);
+
+    [DllImport("user32.dll", EntryPoint = "GetAncestor")]
+    private static extern IntPtr GetAncestorV61881(
+        IntPtr hWnd,
+        uint gaFlags);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowThreadProcessId")]
+    private static extern uint GetWindowThreadProcessIdV61881(
+        IntPtr hWnd,
+        IntPtr processId);
+
+    [DllImport("user32.dll", EntryPoint = "AttachThreadInput")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AttachThreadInputV61881(
+        uint idAttach,
+        uint idAttachTo,
+        [MarshalAs(UnmanagedType.Bool)] bool attach);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetCurrentThreadId")]
+    private static extern uint GetCurrentThreadIdV61881();
 
     private static async Task<bool> WaitForSelectedUserValueAsync(
         int anchorX,
