@@ -43,7 +43,7 @@ public sealed class WorkflowRunner
     {
         Console.WriteLine();
         Console.WriteLine(
-            "=== CIERRES V6.18.82 - PRIORIDAD HISTORICA + COBERTURA COMPLETA ===");
+            "=== CIERRES V6.18.84 - KEYBOARD FALLBACK + PRIORIDAD HISTORICA ===");
 
         var steps =
             workflow.Steps
@@ -158,9 +158,9 @@ public sealed class WorkflowRunner
             $"TotalMs={closuresFlowWatch.ElapsedMilliseconds}");
 
         Console.WriteLine(
-            "[V6.18.82] Proceso de cierres terminado.");
+            "[V6.18.84] Proceso de cierres terminado.");
         Console.WriteLine(
-            "[V6.18.82] Revisa [PRIORITY], [SCAN][PRECHECK], [SCAN][FOCUS], [TIMING][USER], [TIMING][SCAN], [EXPORT] y [RESUMEN].");
+            "[V6.18.84] Revisa [PRIORITY], [SCAN][PRECHECK], [SCAN][KEYBOARD], [SCAN][FOCUS], [TIMING][USER], [TIMING][SCAN], [EXPORT] y [RESUMEN].");
 
         // Diagnóstico activo por defecto. Al ser una decisión de runtime,
         // el compilador no marca el código productivo posterior como inaccesible.
@@ -1986,7 +1986,7 @@ public sealed class WorkflowRunner
         Console.WriteLine();
 
         Console.WriteLine(
-            "=== USER CLOSURE PRIORITY FULL SCAN V6.18.82 + TIMING ===");
+            "=== USER CLOSURE PRIORITY FULL SCAN V6.18.84 + TIMING ===");
 
         var userSelection =
             await GetUserAnchorAsync(
@@ -2082,7 +2082,7 @@ public sealed class WorkflowRunner
         var priorityHistory =
             LoadSanPedroClosureHistory();
 
-        // PRODUCCION V6.18.82:
+        // PRODUCCION V6.18.84:
         // El historial SÍ define prioridad, pero NUNCA limita cobertura.
         // Primero se revisan usuarios con cierres históricos ordenados por:
         //   1) más días con cierre,
@@ -2212,6 +2212,7 @@ public sealed class WorkflowRunner
 
         // ------------------------------------------------------------
         // 3. Barrido diario completo EN ORDEN DE PRIORIDAD HISTÓRICA.
+        //    V6.18.84: intento 2 usa fallback absoluto por teclado.
         //    Cada usuario debe quedar CONCLUYENTE antes de contarse.
         //    Intento 1 usa navegación visual incremental.
         //    Intentos 2-3 usan la selección estable original.
@@ -2281,6 +2282,20 @@ public sealed class WorkflowRunner
                             user,
                             orderedUsers,
                             visualCursor,
+                            cancellationToken);
+                }
+                else if (attempt == 2)
+                {
+                    Console.WriteLine(
+                        $"[SCAN][KEYBOARD] Usuario={user}; " +
+                        "fallback absoluto HOME + DOWN[n] + ENTER.");
+
+                    selected =
+                        await SelectAccessibleUserByNameKeyboardAsync(
+                            userX,
+                            userY,
+                            user,
+                            orderedUsers,
                             cancellationToken);
                 }
                 else
@@ -2878,49 +2893,122 @@ public sealed class WorkflowRunner
                         $"Guardar como no cerró para {targetUser}.");
                 }
     
+                Console.WriteLine(
+                    $"[EXPORT][WAIT-FILE] Usuario={targetUser}; " +
+                    "esperando materialización y estabilidad del archivo (máx. 20s)...");
+
                 FileInfo? savedFile =
                     null;
-    
+
+                long lastLength =
+                    -1;
+
+                var stableSizeSamples =
+                    0;
+
+                const int requiredStableSizeSamples =
+                    3;
+
+                const int maxFileWaitIterations =
+                    40; // 40 x 500ms = 20 segundos.
+
                 for (var wait = 0;
-                     wait < 40;
+                     wait < maxFileWaitIterations;
                      wait++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-    
+
                     if (File.Exists(
                             expectedFullPath))
                     {
                         var info =
                             new FileInfo(
                                 expectedFullPath);
-    
+
+                        info.Refresh();
+
                         if (info.Length > 0)
                         {
-                            savedFile =
-                                info;
-    
-                            break;
+                            if (info.Length ==
+                                lastLength)
+                            {
+                                stableSizeSamples++;
+                            }
+                            else
+                            {
+                                lastLength =
+                                    info.Length;
+
+                                stableSizeSamples =
+                                    1;
+                            }
+
+                            Console.WriteLine(
+                                $"[EXPORT][FILE-SEEN] Usuario={targetUser}; " +
+                                $"Bytes={info.Length}; " +
+                                $"Stable={stableSizeSamples}/{requiredStableSizeSamples}");
+
+                            if (stableSizeSamples >=
+                                requiredStableSizeSamples)
+                            {
+                                savedFile =
+                                    info;
+
+                                break;
+                            }
                         }
                     }
-    
+
                     await Task.Delay(
-                        250,
+                        500,
                         cancellationToken);
                 }
-    
+
                 if (savedFile is null)
                 {
+                    var existsAtTimeout =
+                        File.Exists(
+                            expectedFullPath);
+
+                    long bytesAtTimeout =
+                        0;
+
+                    if (existsAtTimeout)
+                    {
+                        try
+                        {
+                            var timeoutInfo =
+                                new FileInfo(
+                                    expectedFullPath);
+
+                            timeoutInfo.Refresh();
+
+                            bytesAtTimeout =
+                                timeoutInfo.Length;
+                        }
+                        catch
+                        {
+                            // Diagnóstico solamente.
+                        }
+                    }
+
+                    Console.WriteLine(
+                        $"[EXPORT][FILE-TIMEOUT] Usuario={targetUser}; " +
+                        $"Existe={existsAtTimeout}; Bytes={bytesAtTimeout}; " +
+                        $"Ruta=\"{expectedFullPath}\"");
+
                     throw new FileNotFoundException(
-                        $"No apareció el archivo guardado de {targetUser}.",
+                        $"El archivo guardado de {targetUser} no apareció estable " +
+                        "dentro de 20 segundos.",
                         expectedFullPath);
                 }
-    
+
                 exported++;
-    
+
                 Console.WriteLine(
                     $"[EXPORT][OK] Usuario={targetUser}; Bytes={savedFile.Length}; " +
                     $"Archivo=\"{savedFile.FullName}\"");
-    
+
                 // Dar tiempo a Excel/SoftRestaurant a terminar su transición.
                 await Task.Delay(
                     700,
@@ -2967,7 +3055,7 @@ public sealed class WorkflowRunner
 
         Console.WriteLine();
         Console.WriteLine(
-            "=== RESUMEN V6.18.82 ===");
+            "=== RESUMEN V6.18.84 ===");
 
         Console.WriteLine(
             $"[RESUMEN] Usuarios={orderedUsers.Count}");
@@ -2999,20 +3087,20 @@ public sealed class WorkflowRunner
         if (failed == 0)
         {
             Console.WriteLine(
-                "[V6.18.82][OK] Todos los cierres detectados fueron procesados.");
+                "[V6.18.84][OK] Todos los cierres detectados fueron procesados.");
 
             // Compatibilidad con el validador actual del Agent.
             Console.WriteLine(
-                "[V6.18.80][OK] Compatibilidad: resultado V6.18.82 correcto.");
+                "[V6.18.80][OK] Compatibilidad: resultado V6.18.84 correcto.");
         }
         else
         {
             Console.WriteLine(
-                "[V6.18.82][WARN] El proceso terminó con errores aislados; los demás usuarios continuaron.");
+                "[V6.18.84][WARN] El proceso terminó con errores aislados; los demás usuarios continuaron.");
 
             // Compatibilidad con el validador actual del Agent.
             Console.WriteLine(
-                "[V6.18.80][WARN] Compatibilidad: V6.18.81 terminó con errores aislados.");
+                "[V6.18.80][WARN] Compatibilidad: V6.18.84 terminó con errores aislados.");
         }
     }
 
@@ -4586,13 +4674,32 @@ public sealed class WorkflowRunner
             // de enumerar usuarios. Un ESC adicional puede cerrar el propio
             // formulario "Formas de pago por turno", dejando el anchor sin
             // lista accesible y provocando SELECT-FAIL inmediato.
-            var selected =
-                await SelectAccessibleUserByNameAsync(
-                    anchorX,
-                    anchorY,
-                    expectedUser,
-                    orderedUsers,
-                    cancellationToken);
+            bool selected;
+
+            if (attempt == 2)
+            {
+                Console.WriteLine(
+                    $"[SCAN][PRECHECK][KEYBOARD] Intento={attempt}/3; " +
+                    $"selección absoluta por teclado para \"{expectedUser}\".");
+
+                selected =
+                    await SelectAccessibleUserByNameKeyboardAsync(
+                        anchorX,
+                        anchorY,
+                        expectedUser,
+                        orderedUsers,
+                        cancellationToken);
+            }
+            else
+            {
+                selected =
+                    await SelectAccessibleUserByNameAsync(
+                        anchorX,
+                        anchorY,
+                        expectedUser,
+                        orderedUsers,
+                        cancellationToken);
+            }
 
             if (!selected)
             {
@@ -5788,6 +5895,100 @@ public sealed class WorkflowRunner
             targetUser,
             orderedUsers,
             cancellationToken);
+    }
+
+    private static async Task<bool> SelectAccessibleUserByNameKeyboardAsync(
+        int anchorX,
+        int anchorY,
+        string targetName,
+        IReadOnlyList<string> orderedUsers,
+        CancellationToken cancellationToken)
+    {
+        var targetIndex =
+            IndexOfUserName(
+                orderedUsers,
+                targetName);
+
+        if (targetIndex < 0)
+        {
+            Console.WriteLine(
+                $"[A11Y-KEY][ERROR] Usuario no existe en orderedUsers: {targetName}");
+
+            return false;
+        }
+
+        Console.WriteLine(
+            $"[A11Y-KEY][START] Target=\"{targetName}\" Index={targetIndex}; " +
+            "abrir dropdown -> HOME -> DOWN[n] -> ENTER.");
+
+        await OpenUserDropdownAsync(
+            anchorX,
+            anchorY,
+            cancellationToken);
+
+        await Task.Delay(
+            250,
+            cancellationToken);
+
+        // HOME fuerza la selección al primer elemento del combo/lista.
+        SendKey(
+            0x24, // VK_HOME
+            false,
+            false,
+            false);
+
+        await Task.Delay(
+            300,
+            cancellationToken);
+
+        for (var i = 0;
+             i < targetIndex;
+             i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            SendKey(
+                0x28, // VK_DOWN
+                false,
+                false,
+                false);
+
+            await Task.Delay(
+                55,
+                cancellationToken);
+        }
+
+        Console.WriteLine(
+            $"[A11Y-KEY][APPLY] Target=\"{targetName}\"; " +
+            $"HOME + DOWNx{targetIndex} + ENTER");
+
+        SendKey(
+            0x0D, // VK_RETURN
+            false,
+            false,
+            false);
+
+        await Task.Delay(
+            1000,
+            cancellationToken);
+
+        var actual =
+            ReadSelectedUserValue(
+                anchorX,
+                anchorY);
+
+        var ok =
+            string.Equals(
+                actual,
+                targetName,
+                StringComparison.OrdinalIgnoreCase);
+
+        Console.WriteLine(
+            ok
+                ? $"[A11Y-KEY][OK] Esperado=\"{targetName}\" Actual=\"{actual}\""
+                : $"[A11Y-KEY][MISS] Esperado=\"{targetName}\" Actual=\"{actual}\"");
+
+        return ok;
     }
 
     private static async Task<bool> SelectAccessibleUserByNameAsync(
